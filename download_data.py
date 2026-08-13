@@ -52,7 +52,7 @@ def get_stock_list():
     stocks = []
     while (rs.error_code == '0') & rs.next():
         row = rs.get_row_data()
-        code, name = row[0], row[1]
+        code, name = row[rs.fields.index('code')], row[rs.fields.index('code_name')]
         if code.startswith("sh.") or code.startswith("sz."):
             stocks.append((code, name, "-"))
     bs.logout()
