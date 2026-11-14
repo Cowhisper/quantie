@@ -1,0 +1,38 @@
+# 关键词
+- 均线金叉 (Moving Average Golden Cross)
+- 均线死叉 (Moving Average Death Cross)
+- 移动平均线 (MA)
+- 止损 (Stop Loss)
+- 固定本金仓位 (Fixed Capital Position)
+
+# 参考文献
+- https://www.investopedia.com/terms/g/goldencross.asp
+- https://www.investopedia.com/terms/d/deathcross.asp
+
+# 策略描述
+
+## 买入
+
+### 买入倾向排序
+单票独立回测，无跨股票排序；每只股票按日期顺序独立扫描信号。
+- 排序公式：不适用（逐票扫描，先出现金叉信号先买入）
+- 超参注释：`fast_window`=5（快线窗口），`slow_window`=20（慢线窗口）
+- 最低买入要求：当日 5 日均线上穿 20 日均线（金叉），且信号日处于回测区间内、
+  命中全部附加市场过滤条件（`conditions`，如价格区间），
+  且固定本金按当日收盘价能买入至少 1 手；低于该要求不触发买入。
+
+### 买入量
+固定本金仓位（`lib/position.py` 的 `FixedCapitalPosition`）：
+买入股数 = `capital` // 当日收盘价，向下取整到整手（`lot_size`，默认 100 股/手）；
+不足 1 手放弃本次买入。本金与手数可在配置段 `FixedCapitalPosition` 调整。
+
+## 卖出
+
+### 卖出条件
+持仓期间每日收盘依次检查，满足任一条件即卖出：
+- 死叉：5 日均线下穿 20 日均线
+- 止损：收盘价跌破买入价的 (1 - `stop_loss_pct`)（默认 8%）
+- 回测区间结束：日期到达 `end_time` 或最后一条数据，强制平仓
+
+### 卖出量
+全部卖出（卖出数量 = 买入数量，见 `FixedCapitalPosition.sell_amount`）。

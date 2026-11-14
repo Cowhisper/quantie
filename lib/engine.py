@@ -1,6 +1,5 @@
 """回测评估框架：运行策略并生成 HTML 可视化报告。"""
 
-import argparse
 import html
 import os
 import sqlite3
@@ -8,10 +7,11 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from yacrs import _C, cli, configurable, register
 
-from .strategies.base import BaseStrategy
-from .strategies.strategy_example import MovingAverageCrossStrategy
-from .trade import Trade
+import lib  # noqa: F401  import lib 即触发所有策略/条件的 yacrs 注册
+from lib.strategies.base import BaseStrategy
+from lib.trade import Trade
 
 DEFAULT_DB = "a_stock_daily.db"
 
@@ -24,6 +24,53 @@ TRADE_COLUMNS = [
     "股票代码", "名称", "买入日期", "卖出日期", "买入价格",
     "卖出价格", "收益率", "卖出原因", "买入原因",
 ]
+
+# 配置文件中可调的策略注册表：短名 -> 类名
+# （类用 yacrs @register 注册在类上，经 lib/__init__.py 导入完成注册；
+#  实例通过 configurable()(类名) 创建，构造参数自动绑定同名配置段）
+STRATEGY_REGISTRY: Dict[str, str] = {
+    "ma": "MovingAverageCrossStrategy",
+    "ross": "RossCameronGapAndGoStrategy",
+}
+
+CONDITION_NAMES = (
+    "DateRangeCondition",
+    "GapUpCondition",
+    "PriceRangeCondition",
+    "RelativeVolumeCondition",
+)
+
+
+def _instantiate(cls_name: str, **kwargs):
+    """按注册名实例化（yacrs：configurable()(类名)(**kwargs)）。"""
+    return configurable()(cls_name)(**kwargs)
+
+
+def build_strategies(strategy_names: List[str],
+                     condition_map: Optional[Dict[str, List[str]]] = None
+                     ) -> List[BaseStrategy]:
+    """按配置的策略名/条件名实例化策略；条件与策略的构造参数自动绑定
+    各自的同名配置段（如 PriceRangeCondition.min_price）。"""
+    condition_map = condition_map or {}
+    strategies: List[BaseStrategy] = []
+    for name in strategy_names:
+        if name not in STRATEGY_REGISTRY:
+            raise SystemExit(f"未知策略: {name}（可选: {', '.join(STRATEGY_REGISTRY)}）")
+        cls_name = STRATEGY_REGISTRY[name]
+        kwargs: Dict[str, object] = {}
+        # yacrs 登记的构造参数名；支持 conditions 的策略才装配条件
+        if "conditions" in _C._configurables[cls_name]["kwargs"]:
+            conds = []
+            # 注意 yacrs Node 重写了 get()（点路径取值且缺失时报错），这里用 dict 语义
+            cond_names = condition_map[name] if name in condition_map else []
+            for cond_name in cond_names:
+                if cond_name not in CONDITION_NAMES:
+                    raise SystemExit(
+                        f"未知条件: {cond_name}（可选: {', '.join(CONDITION_NAMES)}）")
+                conds.append(_instantiate(cond_name))
+            kwargs["conditions"] = conds
+        strategies.append(_instantiate(cls_name, **kwargs))
+    return strategies
 
 
 # ----------------------------------------------------------------------
@@ -66,36 +113,26 @@ def compute_overview(trades: List[Trade], stock_count: int) -> Dict[str, float]:
     wins = sum(1 for r in returns if r > 0)
     losses = sum(1 for r in returns if r < 0)
 
-    # 用 log 空间累加，避免笔数很多时连乘溢出 float64
-    log_return_sum = float(np.log1p(returns).sum()) if returns else 0.0
-    with np.errstate(over="ignore"):
-        total_return = float(np.expm1(log_return_sum))
-
     return {
         "回测股票数": stock_count,
         "总交易次数": len(closed),
         "盈利次数": wins,
         "亏损次数": losses,
         "胜率": wins / len(closed) if closed else 0.0,
-        "总收益率": total_return,
+        # 每笔固定买入数量（等额定仓），累计收益率 = 各笔收益率之和；
+        # 用复利连乘会随交易笔数指数放大，与实际资金占用不符
+        "总收益率": float(np.sum(returns)) if returns else 0.0,
         "最大单笔盈利": max(returns) if returns else 0.0,
         "最大单笔亏损": min(returns) if returns else 0.0,
         "平均收益率": float(np.mean(returns)) if returns else 0.0,
-        # 内部字段：总收益率的对数，用于格式化展示
-        "总收益率_log": log_return_sum,
     }
 
 
 PCT_METRICS = {"胜率", "总收益率", "最大单笔盈利", "最大单笔亏损", "平均收益率"}
 
 
-def format_metric(key: str, value, log_value: float = None) -> str:
+def format_metric(key: str, value) -> str:
     if key in PCT_METRICS:
-        if not np.isfinite(value):
-            # 连乘结果超出 float64 范围，用科学计数法展示倍数
-            return f"≈1e{log_value / np.log(10):.0f}"
-        if abs(value) >= 1e6:
-            return f"{value:.2e}"
         return f"{value * 100:.2f}%"
     return str(value)
 
@@ -202,7 +239,7 @@ document.addEventListener('click', function (e) {
 def _render_overview(overview: Dict[str, float]) -> str:
     header = "".join(f"<th>{k}</th>" for k in OVERVIEW_METRICS)
     values = "".join(
-        f"<td>{format_metric(k, overview[k], overview.get('总收益率_log'))}</td>"
+        f"<td>{format_metric(k, overview[k])}</td>"
         for k in OVERVIEW_METRICS
     )
     table = f"<table><tr>{header}</tr><tr>{values}</tr></table>"
@@ -299,7 +336,8 @@ class Engine:
     """对一组策略在相同数据区间上执行回测。"""
 
     def __init__(self, strategies: Optional[List[BaseStrategy]] = None) -> None:
-        self.strategies = strategies if strategies is not None else [MovingAverageCrossStrategy()]
+        default_name = STRATEGY_REGISTRY["ma"]
+        self.strategies = strategies if strategies is not None else [_instantiate(default_name)]
 
     def evaluate(self, df: pd.DataFrame, start_time: str, end_time: str) -> Dict[str, dict]:
         start_ts, end_ts = pd.Timestamp(start_time), pd.Timestamp(end_time)
@@ -325,7 +363,7 @@ class Engine:
             overview = compute_overview(trades, stock_count)
             print(f"[{strategy.name}] 交易 {overview['总交易次数']} 笔 | "
                   f"胜率 {format_metric('胜率', overview['胜率'])} | "
-                  f"总收益率 {format_metric('总收益率', overview['总收益率'], overview['总收益率_log'])}")
+                  f"总收益率 {format_metric('总收益率', overview['总收益率'])}")
 
             results[strategy.name] = {
                 "overview": overview,
@@ -337,29 +375,36 @@ class Engine:
 
 
 # ----------------------------------------------------------------------
-# CLI
+# CLI（yacrs：-c 加载 yaml/json/toml 配置，key=value 命令行覆盖）
 # ----------------------------------------------------------------------
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="策略回测评估框架")
-    parser.add_argument("--db", default=DEFAULT_DB, help="数据库路径")
-    parser.add_argument("--start", required=True, help="回测开始日期 YYYY-MM-DD")
-    parser.add_argument("--end", required=True, help="回测结束日期 YYYY-MM-DD")
-    parser.add_argument("--output", default="strategy_report.html", help="输出 HTML 报告路径")
-    parser.add_argument("--warmup", type=int, default=120, help="指标预热天数（默认 120）")
-    parser.add_argument("--limit", type=int, default=0, help="只回测前 N 只股票（0=全部）")
-    parser.add_argument("--max-charts", type=int, default=1000,
-                        help="每个策略最多为前 N 笔交易嵌入 K 线图（0=全部，大数会显著增大报告体积）")
-    args = parser.parse_args()
+@cli("engine")
+@register("engine")
+def main(db=DEFAULT_DB, start=None, end=None, output="strategy_report.html",
+         warmup=120, limit=0, max_charts=1000,
+         strategies=None, conditions=None) -> None:
+    """
+    回测入口。所有参数在配置文件中设置（见 strategy_test.yaml），
+    也可以用 key=value 在命令行覆盖：
+        python -m lib.engine -c strategy_test.yaml engine.start=2025-01-01
+    """
+    if not start or not end:
+        raise SystemExit("请在配置文件中设置 engine.start / engine.end（回测起止日期 YYYY-MM-DD）")
 
-    df = load_data(args.db, args.start, args.end, warmup_days=args.warmup, limit=args.limit)
+    # 命令行 key=value 覆盖进来的值是字符串，数值参数统一转换
+    warmup, limit, max_charts = int(warmup), int(limit), int(max_charts)
+    if isinstance(strategies, str):  # 命令行覆盖单值时按一个策略处理
+        strategies = [strategies]
+    strategy_names = list(strategies) if strategies else ["ma"]
+
+    df = load_data(db, start, end, warmup_days=warmup, limit=limit)
     if df.empty:
         print("数据库中没有数据，请先运行 download_data.py")
         return
 
-    engine = Engine()
-    results = engine.evaluate(df, args.start, args.end)
-    path = generate_report(results, args.output, max_charts=args.max_charts)
+    engine = Engine(strategies=build_strategies(strategy_names, conditions))
+    results = engine.evaluate(df, start, end)
+    path = generate_report(results, output, max_charts=max_charts)
     print(f"报告已生成: {path}")
 
 
