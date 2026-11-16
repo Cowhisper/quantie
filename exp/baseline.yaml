@@ -1,0 +1,43 @@
+# 用法: python -m lib.engine -c strategy_test.yaml
+# 命令行覆盖任意配置项（数字建议显式声明类型，否则按字符串处理）:
+#   python -m lib.engine -c strategy_test.yaml engine.limit=5 PriceRangeCondition.max_price:float=50
+
+# 回测引擎参数（对应 lib/engine.py 的 main）
+engine:
+  db: a_stock_daily.db          # 数据库路径
+  start: "2025-01-01"           # 回测开始日期（必填）
+  end: "2026-11-15"             # 回测结束日期（必填）
+  output: exp/strategy_report.html  # serve=false 时生成的静态报告路径
+  trades_xlsx: exp/trades.xlsx      # 成交交易 Excel 路径（每策略一个 sheet，每笔交易一行；空=不导出）
+  warmup: 120                   # 指标预热天数
+  serve: false                   # true=启动 Web 服务（Vue 交互报告）；false=只生成静态 HTML
+  host: "127.0.0.1"
+  port: 8000
+  limit: 0                      # 只回测前 N 只股票（0=全部；排序靠前的多为指数）
+  max_charts: 1000              # 每个策略嵌入 K 线图的交易数量上限（同一笔交易持仓期内共用一张图）
+  initial_capital: 100000      # 账户初始资金（交易明细的总资产/现金/持仓金额从这笔资金起算）
+  max_positions: 10            # 最大持仓股票数；资金与仓位按策略买入倾向评分优先配给高分信号，现金保证不为负
+  strategies: [ross]        # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go）
+  conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
+    ross: [PriceRangeCondition]
+
+# 各条件类的参数（条件用 yacrs @register 注册，段名 = 类名）
+# 示例给了一个接近"不限"的宽区间；当前库排序靠前的代码多为指数（价格数百至数千），
+# 收窄区间（如 10~50）会把它们全部过滤掉
+PriceRangeCondition:
+  min_price: 1
+  max_price: 10000
+
+# 仓位管理（lib/position.py）：每笔固定本金，股数向下取整到整手，不足一手放弃
+FixedCapitalPosition:
+  capital: 10000
+  lot_size: 100
+
+RossCameronGapAndGoStrategy:
+  gap_min_pct: 0.04
+  rel_vol_min: 2.0
+  vol_window: 20
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.05
+  trail_pct: 0.05
+  max_hold_days: 5
