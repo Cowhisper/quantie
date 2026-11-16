@@ -36,7 +36,11 @@ class BaseStrategy(ABC):
     @abstractmethod
     def run(self, df: pd.DataFrame, start_time, end_time) -> List[Trade]:
         """
-        在回测区间 [start_time, end_time] 内运行策略，
-        返回选中的交易列表。
+        在回测区间 [start_time, end_time] 内运行策略，返回买入信号列表
+        （Trade 的买入腿；卖出腿挂在同一对象上）。
+
+        策略不了解账户状态：信号是否成交由引擎的账户模拟
+        （lib/account.py）按资金与持仓上限约束、依 Trade.score
+        （买入倾向评分，越高越优先）决定。
         """
         raise NotImplementedError

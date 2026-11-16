@@ -22,6 +22,7 @@ class Trade:
     sell_amount: Optional[float] = None  # 卖出数量（股）
     sell_price: Optional[float] = None   # 卖出价格
     sell_reason: Optional[str] = None    # 卖出原因
+    score: float = 0.0               # 买入倾向评分（越高越优先成交，见 lib/account.py）
 
     @property
     def return_pct(self) -> Optional[float]:

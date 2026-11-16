@@ -48,6 +48,9 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
     - 曾盈利后自持仓期最高价回撤 trail_pct：移动止盈（动能衰减）
     - 持仓满 max_hold_days 天：时间止损（其日内平仓的日线代理）
     - 回测区间结束：强制平仓
+
+    买入信号附带倾向评分（Trade.score，见 docs/strategy_ross_cameron.md##买入倾向排序）：
+    账户层（lib/account.py）在资金/持仓约束下按评分降序决定哪些信号成交。
     """
 
     name = "Ross Cameron Gap&Go"
@@ -93,6 +96,10 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         close = df["close"]
         open_ = df["open"]
         low = df["low"]
+        volume = df["volume"]
+        # 相对放量（与 RelativeVolumeCondition 同口径：当日量 / 过去 vol_window 日均量，不含当日）
+        prev_avg_volume = volume.shift(1).rolling(self.vol_window).mean()
+        rel_volume = volume / prev_avg_volume
 
         # 最低买入要求（docs/strategy_ross_cameron.md##买入）：日期区间 + 跳空高开 +
         # 相对放量 + 全部附加条件取交集；每个条件都在完整 df 上计算，
@@ -136,6 +143,14 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                 if amount <= 0:
                     continue
 
+                # 买入倾向评分（docs/strategy_ross_cameron.md##买入倾向排序）：信号日
+                # 跳空幅度 × 相对放量倍数，缺口越大、放量越足评分越高
+                # （账户层按评分配资金/仓位）
+                prev_close = float(close.iloc[i - 1]) if i > 0 else 0.0
+                gap_pct = (float(open_.iloc[i]) / prev_close - 1) if prev_close else 0.0
+                rv = rel_volume.iloc[i]
+                score = gap_pct * (float(rv) if not pd.isna(rv) else 0.0)
+
                 trades.append(Trade(
                     ticker=ticker,
                     name=name,
@@ -143,6 +158,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                     buy_amount=amount,
                     buy_price=entry_price,
                     buy_reason=self.BUY_REASONS["gap_go"],
+                    score=score,
                 ))
                 position_open = True
                 signal_low = float(low.iloc[i])

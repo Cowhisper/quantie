@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-A股日频数据下载脚本 —— Baostock版
-- 国内源，不限流，完全免费
-- 支持前复权/后复权
-- 自动去重、断点续传、增量更新
-- 支持 --full-refresh 强制全量刷新
-- 支持 --start/--end 指定下载日期范围（--end 默认为昨天）
-- 支持 --chunk N 分块下载：每 N 天一轮，逐轮遍历全部股票，日志显示 ETA
-- 写入使用 INSERT OR REPLACE，重复下载自动去重
+A股日频数据下载脚本 —— Baostock 版（yacrs 配置驱动）
+
+- 国内源，不限流，完全免费，前复权
+- 增量更新：每只股票只下载数据库中最后日期之后的数据，已覆盖的自动跳过
+- 每只股票一次请求覆盖全部缺失区间（不做日期分块），请求数 = 股票数
+- 每只股票写入后立即提交，中途断掉不丢已完成的部分（天然断点续传）
+- 用法（所有参数见 download.yaml 的 download 段，命令行 key=value 可覆盖任意项）:
+      python download_data.py -c download.yaml
+      python download_data.py -c download.yaml download.end=2026-11-15 download.all=true
 """
 
 import os
-import sys
-import time
 import sqlite3
-import argparse
-import pandas as pd
+import time
 from datetime import datetime, timedelta
 
-# ==================== 配置区 ====================
-DB_PATH = "a_stock_daily.db"
-START_DATE = "2024-01-01"
+import pandas as pd
+from yacrs import cli, register
 
-STOCKS = [
+DEFAULT_DB = "a_stock_daily.db"
+DEFAULT_START = "2024-01-01"
+
+# 默认核心股票池（配置 download.stocks 为空时生效）
+DEFAULT_STOCKS = [
     ("sh.600519", "贵州茅台", "白酒"),
     ("sz.002594", "比亚迪", "新能源"),
     ("sz.300750", "宁德时代", "电池"),
@@ -45,24 +46,22 @@ STOCKS = [
     ("sz.300760", "迈瑞医疗", "医疗器械"),
 ]
 
-
-def get_stock_list():
-    import baostock as bs
-
-    bs.login()
-    rs = bs.query_all_stock(day="2024-07-01")
-    stocks = []
-    while (rs.error_code == '0') & rs.next():
-        row = rs.get_row_data()
-        code, name = row[rs.fields.index('code')], row[rs.fields.index('code_name')]
-        if code.startswith("sh.") or code.startswith("sz."):
-            stocks.append((code, name, "-"))
-    bs.logout()
-    return stocks
+FIELDS = "date,open,high,low,close,volume,amount,turn,pctChg"
+NUMERIC_COLS = ["open", "high", "low", "close", "amount", "turn", "pctChg"]
+DAILY_COLS = ["ticker", "name", "sector", "date", "open", "high", "low", "close",
+              "volume", "amount", "turn", "pctChg"]
+DATE_FMT = "%Y-%m-%d"
+# 头部缺口超过该天数才认为 start 被有意前移、需要补齐历史；避免把起始日落在
+# 节假日（如 2024-01-01，首个交易日 01-02）误判为缺口而每天全量重下
+GAP_FILL_DAYS = 7
 
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
+# ----------------------------------------------------------------------
+# 数据库
+# ----------------------------------------------------------------------
+
+def init_db(db_path):
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS stock_daily (
@@ -86,321 +85,229 @@ def init_db():
         )
     """)
     conn.commit()
-    conn.close()
+    return conn
 
 
-def get_stock_status():
-    """获取每只股票的最后更新日期"""
-    if not os.path.exists(DB_PATH):
-        return {}
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT ticker, last_date FROM stock_meta")
-    result = {row[0]: row[1] for row in c.fetchall()}
-    conn.close()
-    return result
+def get_stock_status(conn):
+    """ticker -> (first_date, last_date)，即库中已下载数据覆盖的区间"""
+    c = conn.execute("SELECT ticker, first_date, last_date FROM stock_meta")
+    return {row[0]: (row[1], row[2]) for row in c.fetchall()}
 
 
-def calc_date_range(ticker, last_date, args):
-    """
-    计算该股票本次需要下载的日期范围
-    返回: (start_date, end_date, is_incremental)
-    """
-    if args.full_refresh or last_date is None:
-        return args.start, args.end, False
+def save_stock(conn, code, name, sector, df):
+    """写入一只股票的数据并更新元信息（调用方已 commit 过表结构）。"""
+    for col in NUMERIC_COLS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").astype("Int64")
+    df["ticker"] = code
+    df["name"] = name
+    df["sector"] = sector
 
-    last_dt = datetime.strptime(last_date, "%Y-%m-%d")
-    next_dt = last_dt + timedelta(days=1)
-    start = next_dt.strftime("%Y-%m-%d")
-    end = args.end
+    # NaN/NA 转为 None，重复记录由主键 (ticker, date) 覆盖，保证可重复下载
+    records = (df[DAILY_COLS].astype(object)
+               .where(df[DAILY_COLS].notna(), None).values.tolist())
+    conn.executemany(
+        f"INSERT OR REPLACE INTO stock_daily ({', '.join(DAILY_COLS)}) "
+        f"VALUES ({', '.join(['?'] * len(DAILY_COLS))})",
+        records,
+    )
 
-    if start > end:
-        return None, None, True
-
-    return start, end, True
-
-
-def daterange_chunks(start_date, end_date, chunk_days):
-    """将日期范围按 chunk_days 天切分，逐段产出 (chunk_start, chunk_end)"""
-    start = datetime.strptime(start_date, "%Y-%m-%d")
-    end = datetime.strptime(end_date, "%Y-%m-%d")
-    cur = start
-    while cur <= end:
-        chunk_end = min(cur + timedelta(days=chunk_days - 1), end)
-        yield cur.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")
-        cur = chunk_end + timedelta(days=1)
+    first_d, last_d, cnt = conn.execute(
+        "SELECT MIN(date), MAX(date), COUNT(*) FROM stock_daily WHERE ticker = ?",
+        (code,)).fetchone()
+    conn.execute("""
+        INSERT OR REPLACE INTO stock_meta
+        (ticker, name, sector, first_date, last_date, record_count, update_time)
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    """, (code, name, sector, first_d, last_d, cnt))
 
 
-def download_stock(bs, code, name, sector, stock_status, args, date_range=None):
-    """下载单只股票
-    date_range: 显式指定 (start, end) 时按该范围下载（分块模式），否则按增量逻辑计算
-    """
+def log_success(conn, code, action):
+    conn.execute("""
+        INSERT OR REPLACE INTO download_log (ticker, status, message, attempt_count, last_attempt)
+        VALUES (?, 'success', ?, 1, datetime('now'))
+    """, (code, action))
 
-    last_date = stock_status.get(code)
-    if date_range is not None:
-        start_date, end_date, is_incr = date_range[0], date_range[1], False
-    else:
-        start_date, end_date, is_incr = calc_date_range(code, last_date, args)
 
-    if start_date is None:
-        return code, 0, "UP-TO-DATE"
+# ----------------------------------------------------------------------
+# 下载
+# ----------------------------------------------------------------------
 
-    fields_str = "date,open,high,low,close,volume,amount,turn,pctChg"
+def fetch_stock(bs, code, start_date, end_date):
+    """下载单只股票 [start_date, end_date] 的日线，返回 DataFrame（可能为空）。"""
+    rs = bs.query_history_k_data_plus(
+        code, FIELDS,
+        start_date=start_date, end_date=end_date,
+        frequency="d", adjustflag="2",
+    )
+    if rs.error_code != "0":
+        raise RuntimeError(rs.error_msg)
+    rows = []
+    while rs.next():
+        rows.append(rs.get_row_data())
+    return pd.DataFrame(rows, columns=rs.fields)
 
-    if args.dry_run:
-        action = "增量" if is_incr else "全量"
-        return code, 0, f"DRY-RUN({action} {start_date}~{end_date})"
 
-    try:
-        rs = bs.query_history_k_data_plus(
-            code, fields_str,
-            start_date=start_date, end_date=end_date,
-            frequency="d", adjustflag="2"
-        )
-        if rs.error_code != '0':
-            return code, 0, f"DOWNLOAD: {rs.error_msg}"
+def get_stock_list(bs, end_date):
+    """全 A 股代码表（取 end_date 当天及之前最近一个有数据的交易日）。"""
+    day = datetime.strptime(end_date, "%Y-%m-%d")
+    for _ in range(10):  # 向前回退直到命中交易日
+        rs = bs.query_all_stock(day=day.strftime("%Y-%m-%d"))
+        stocks = []
+        while (rs.error_code == "0") & rs.next():
+            row = rs.get_row_data()
+            code = row[rs.fields.index("code")]
+            if code.startswith("sh.") or code.startswith("sz."):
+                stocks.append((code, row[rs.fields.index("code_name")], "-"))
+        if stocks:
+            return stocks
+        day -= timedelta(days=1)
+    raise RuntimeError("无法获取全 A 股代码表（连续 10 天均非交易日？）")
 
-        data_list = []
-        while rs.next():
-            data_list.append(rs.get_row_data())
 
-        if not data_list:
-            return code, 0, "无数据"
-
-        df = pd.DataFrame(data_list, columns=rs.fields)
-
-        numeric_cols = ['open', 'high', 'low', 'close', 'amount', 'turn', 'pctChg']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        df['volume'] = pd.to_numeric(df['volume'], errors='coerce').astype('Int64')
-
-        df['ticker'] = code
-        df['name'] = name
-        df['sector'] = sector
-
-    except Exception as e:
-        return code, 0, f"DOWNLOAD: {str(e)[:100]}"
-
-    try:
-        cols = ['ticker', 'name', 'sector', 'date', 'open', 'high', 'low', 'close',
-                'volume', 'amount', 'turn', 'pctChg']
-        conn = sqlite3.connect(DB_PATH)
-        # NaN/NA 转为 None，重复记录由主键 (ticker, date) 覆盖，保证可重复下载
-        records = df[cols].astype(object).where(df[cols].notna(), None).values.tolist()
-        conn.executemany(
-            f"INSERT OR REPLACE INTO stock_daily ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})",
-            records
-        )
-
-        c = conn.cursor()
-        c.execute("SELECT MIN(date), MAX(date), COUNT(*) FROM stock_daily WHERE ticker = ?", (code,))
-        first_d, last_d, cnt = c.fetchone()
-
-        c.execute("""
-            INSERT OR REPLACE INTO stock_meta
-            (ticker, name, sector, first_date, last_date, record_count, update_time)
-            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-        """, (code, name, sector, first_d, last_d, cnt))
-
-        if date_range is not None:
-            action = "分块"
-        else:
-            action = "增量" if is_incr else "全量"
-        c.execute("""
-            INSERT OR REPLACE INTO download_log (ticker, status, message, attempt_count, last_attempt)
-            VALUES (?, 'success', ?, 1, datetime('now'))
-        """, (code, action))
-
-        conn.commit()
-        conn.close()
-
-        return code, len(df), f"SUCCESS({action})"
-
-    except Exception as e:
-        return code, 0, f"EXCEPTION: {str(e)[:100]}"
+def plan_range(covered, start, end, full_refresh):
+    """计算该股票本次需要下载的区间。covered=(first_date, last_date) 或 None，
+    返回 (start, end, 动作) 或 None（已覆盖）。"""
+    if full_refresh or covered is None:
+        return start, end, "全量"
+    first_date, last_date = covered
+    if last_date >= end:
+        return None
+    if last_date < start:
+        # 已有数据全在窗口之前：重下整个窗口（重复部分主键去重）
+        return start, end, "全量"
+    # 尾部缺口 (last_date, end] 必补
+    next_day = (datetime.strptime(last_date, DATE_FMT) + timedelta(days=1)
+                ).strftime(DATE_FMT)
+    # 头部缺口 [start, first_date)：仅当 start 被有意前移超过 GAP_FILL_DAYS 才
+    # 从头补齐，否则视为起始日落在节假日，照常增量即可
+    if first_date:
+        head_gap = (datetime.strptime(first_date, DATE_FMT)
+                    - datetime.strptime(start, DATE_FMT))
+        if head_gap > timedelta(days=GAP_FILL_DAYS):
+            return start, end, "增量"
+    return next_day, end, "增量"
 
 
 def format_eta(seconds):
-    """将秒数格式化为 h:mm:ss 或 m:ss"""
     seconds = int(max(0, seconds))
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
-def run_per_stock_download(bs, stocks, stock_status, args):
-    """普通模式：逐只股票下载（每只股票一次性下载其日期范围）"""
-    success_count = 0
-    skip_count = 0
-    fail_count = 0
-
-    for i, (code, name, sector) in enumerate(stocks, 1):
-        result = download_stock(bs, code, name, sector, stock_status, args)
-
-        if "SUCCESS" in result[2]:
-            status_icon = "✅"
-            success_count += 1
-        elif "UP-TO-DATE" in result[2] or "DRY-RUN" in result[2]:
-            status_icon = "⏭️"
-            skip_count += 1
-        else:
-            status_icon = "❌"
-            fail_count += 1
-
-        print(f"[{i}/{len(stocks)}] {status_icon} {code} {name}: {result[1]}条 | {result[2]}")
-        time.sleep(0.3)
-
-    return success_count, skip_count, fail_count
+def _as_bool(v):
+    return v if isinstance(v, bool) else str(v).lower() not in ("0", "false", "no", "")
 
 
-def run_chunked_download(bs, stocks, args):
-    """分块模式：外层按日期分块迭代，内层遍历全部股票，日志显示 ETA"""
-    chunks = list(daterange_chunks(args.start, args.end, args.chunk))
-    total_tasks = len(chunks) * len(stocks)
+# ----------------------------------------------------------------------
+# 入口（yacrs：-c 加载 yaml/json/toml 配置，key=value 命令行覆盖）
+# ----------------------------------------------------------------------
 
-    if args.dry_run:
-        print(f"计划: {len(chunks)} 轮 x {len(stocks)} 只 = {total_tasks} 个下载任务")
-        stock_status = get_stock_status()
-        for ci, (cs, ce) in enumerate(chunks, 1):
-            if args.full_refresh:
-                need = len(stocks)
-            else:
-                need = sum(1 for code, _, _ in stocks
-                           if not (stock_status.get(code) and stock_status[code] >= ce))
-            print(f"[{ci}/{len(chunks)}] {cs} ~ {ce}: 需下载 {need}/{len(stocks)} 只")
-        return 0, 0, 0
-
-    print(f"共分 {len(chunks)} 轮 x {len(stocks)} 只 = {total_tasks} 个下载任务")
-    print()
-
-    success_count = 0
-    skip_count = 0
-    fail_count = 0
-    total_rows = 0
-    done_tasks = 0
-    t_start = time.time()
-
-    for ci, (cs, ce) in enumerate(chunks, 1):
-        stock_status = get_stock_status()  # 每轮刷新，利用前面轮次已下载的数据
-        for si, (code, name, sector) in enumerate(stocks, 1):
-            prefix = f"[{ci}/{len(chunks)} {cs}~{ce}] [{si}/{len(stocks)}]"
-
-            last_date = stock_status.get(code)
-            if not args.full_refresh and last_date and last_date >= ce:
-                skip_count += 1
-                rows = 0
-                status = "⏭️ 已覆盖"
-            else:
-                result = download_stock(bs, code, name, sector, stock_status, args,
-                                        date_range=(cs, ce))
-                rows = result[1]
-                total_rows += rows
-                if "SUCCESS" in result[2]:
-                    success_count += 1
-                    status = "✅"
-                elif "无数据" in result[2]:
-                    skip_count += 1
-                    status = "⏭️ 无数据"
-                else:
-                    fail_count += 1
-                    status = f"❌ {result[2]}"
-                time.sleep(0.3)
-
-            done_tasks += 1
-            elapsed = time.time() - t_start
-            remaining = elapsed / done_tasks * (total_tasks - done_tasks)
-            eta_clock = (datetime.now() + timedelta(seconds=remaining)).strftime("%H:%M:%S")
-            print(f"{prefix} {status} {code} {name}: {rows}条 | "
-                  f"已用 {format_eta(elapsed)} | 预计剩余 {format_eta(remaining)} (ETA {eta_clock})")
-
-    print()
-    print(f"分块下载完成: 共 {total_rows} 条 | ✅{success_count} | ⏭️跳过{skip_count} | ❌失败{fail_count}")
-
-    return success_count, skip_count, fail_count
-
-
-def batch_download(args):
-    import baostock as bs
-
-    init_db()
-
-    if args.all:
-        stocks = get_stock_list()
-    else:
-        stocks = STOCKS
+@cli("download")
+@register("download")
+def main(db=DEFAULT_DB, start=DEFAULT_START, end=None,
+         all=False, full_refresh=False, dry_run=False, sleep=0.0,
+         stocks=None) -> None:
+    """
+    数据下载入口。所有参数在配置文件 download.yaml 的 download 段中设置，
+    也可以用 key=value 在命令行覆盖：
+        python download_data.py -c download.yaml download.end=2026-11-15
+    每日增量更新只需直接运行（end 默认为昨天），已下载到库的数据自动跳过。
+    """
+    all, full_refresh, dry_run = _as_bool(all), _as_bool(full_refresh), _as_bool(dry_run)
+    sleep = float(sleep)
+    end = end or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    if start > end:
+        raise SystemExit(f"download.start ({start}) 不能晚于 download.end ({end})")
 
     sep = "=" * 60
     print(sep)
     print("Baostock A股日频数据下载")
-    print(f"日期范围: {args.start} ~ {args.end}")
-    mode_str = "全量刷新" if args.full_refresh else "增量更新"
-    print(f"模式: {mode_str}")
-    if args.chunk:
-        print(f"分块下载: 每 {args.chunk} 天一轮，逐轮下载全部股票，直至全部完成")
-    if args.dry_run:
-        print("👁️  预览模式: 只显示，不写入")
-    print(f"股票池: {len(stocks)} 只")
+    print(f"日期范围: {start} ~ {end} | 模式: {'全量刷新' if full_refresh else '增量更新'}"
+          f"{' | 👁️ 预览（不写入）' if dry_run else ''}")
+    print(f"数据库: {db}")
     print(sep)
     print()
 
-    lg = bs.login()
-    print(f"登录结果: {lg.error_msg}")
-    if lg.error_code != '0':
-        print("登录失败，请检查网络")
+    # 解析股票池：全 A 股需联网取代码表，其余直接来自配置/默认值
+    import baostock as bs
+    if all or not dry_run:
+        lg = bs.login()
+        if lg.error_code != "0":
+            raise SystemExit(f"Baostock 登录失败: {lg.error_msg}")
+
+    if all:
+        pool = get_stock_list(bs, end)
+    elif stocks:
+        pool = [tuple(s) for s in stocks]
+    else:
+        pool = DEFAULT_STOCKS
+    print(f"股票池: {len(pool)} 只（{'全 A 股' if all else '配置文件 stocks'}）")
+    print()
+
+    if dry_run:
+        # 预览不写入：只根据库中已有进度列出每只股票将下载的区间
+        conn = sqlite3.connect(db) if os.path.exists(db) else None
+        status = get_stock_status(conn) if conn else {}
+        for code, name, _ in pool:
+            planned = plan_range(status.get(code), start, end, full_refresh)
+            if planned is None:
+                print(f"⏭️  {code} {name}: 已覆盖至 {status[code][1]}")
+            else:
+                print(f"📥 {code} {name}: {planned[2]} {planned[0]} ~ {planned[1]}")
+        if conn:
+            conn.close()
+        if all:
+            bs.logout()
         return
 
-    if args.chunk:
-        success_count, skip_count, fail_count = run_chunked_download(bs, stocks, args)
-    else:
-        stock_status = get_stock_status()
-        success_count, skip_count, fail_count = run_per_stock_download(bs, stocks, stock_status, args)
+    conn = init_db(db)
+    status = get_stock_status(conn)
+
+    success_count = skip_count = fail_count = total_rows = 0
+    t_start = time.time()
+
+    for i, (code, name, sector) in enumerate(pool, 1):
+        planned = plan_range(status.get(code), start, end, full_refresh)
+        if planned is None:
+            skip_count += 1
+            print(f"[{i}/{len(pool)}] ⏭️  {code} {name}: 已最新 ({status[code][1]})")
+            continue
+        dl_start, dl_end, action = planned
+
+        try:
+            df = fetch_stock(bs, code, dl_start, dl_end)
+            if df.empty:
+                skip_count += 1
+                print(f"[{i}/{len(pool)}] ⏭️  {code} {name}: 区间内无数据")
+            else:
+                save_stock(conn, code, name, sector, df)
+                log_success(conn, code, action)
+                conn.commit()
+                success_count += 1
+                total_rows += len(df)
+                print(f"[{i}/{len(pool)}] ✅ {code} {name}: {len(df)}条 ({action} {dl_start}~{dl_end})")
+        except Exception as e:
+            fail_count += 1
+            print(f"[{i}/{len(pool)}] ❌ {code} {name}: {str(e)[:100]}")
+
+        if sleep > 0:
+            time.sleep(sleep)
+
+        elapsed = time.time() - t_start
+        done = success_count + skip_count + fail_count
+        remaining = elapsed / done * (len(pool) - done)
+        print(f"      已用 {format_eta(elapsed)} | 预计剩余 {format_eta(remaining)}")
 
     bs.logout()
+    conn.close()
 
     print()
     print(sep)
-    print(f"完成: ✅{success_count} | ⏭️跳过/预览{skip_count} | ❌失败{fail_count}")
-    print(f"数据库: {DB_PATH}")
+    print(f"完成: 共 {total_rows} 条 | ✅{success_count} | ⏭️跳过{skip_count} | ❌失败{fail_count}")
+    print(f"数据库: {db}")
     print(sep)
-
-    if not args.dry_run:
-        final_status = get_stock_status()
-        print()
-        print("📋 各股票最新数据日期:")
-        for code, name, _ in stocks[:20]:
-            last = final_status.get(code, "从未下载")
-            print(f"   {code} {name}: {last}")
-
-
-def main():
-
-    global DB_PATH
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    parser = argparse.ArgumentParser(description="A股日频数据下载 —— 增量更新版")
-    parser.add_argument("--full-refresh", "--full", dest="full_refresh", action="store_true",
-                        help="强制全量刷新（忽略缓存，重新下载全部历史）")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="预览模式：只显示会下载哪些，不实际写入")
-    parser.add_argument("--all", action="store_true",
-                        help="下载全A股（默认只下载配置的核心股票池）")
-    parser.add_argument("--db", default=DB_PATH, help=f"数据库路径 (默认: {DB_PATH})")
-    parser.add_argument("--start", default=START_DATE,
-                        help=f"下载起始日期 YYYY-MM-DD (默认: {START_DATE})")
-    parser.add_argument("--end", default=yesterday,
-                        help=f"下载结束日期 YYYY-MM-DD (默认: 昨天，即 {yesterday})")
-    parser.add_argument("--chunk", type=int, default=None, metavar="N",
-                        help="分块下载：每 N 天一轮，逐轮下载全部股票，直至全部完成")
-    args = parser.parse_args()
-
-    if args.start > args.end:
-        parser.error(f"--start ({args.start}) 不能晚于 --end ({args.end})")
-    if args.chunk is not None and args.chunk <= 0:
-        parser.error("--chunk 必须是大于 0 的整数")
-
-    DB_PATH = args.db
-
-    batch_download(args)
 
 
 if __name__ == "__main__":

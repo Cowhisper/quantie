@@ -10,6 +10,7 @@ import pandas as pd
 from yacrs import _C, cli, configurable, register
 
 import lib  # noqa: F401  import lib 即触发所有策略/条件的 yacrs 注册
+from lib.account import simulate_account
 from lib.strategies.base import BaseStrategy
 from lib.trade import Trade
 
@@ -17,12 +18,18 @@ DEFAULT_DB = "a_stock_daily.db"
 
 OVERVIEW_METRICS = [
     "回测股票数", "总交易次数", "盈利次数", "亏损次数",
-    "胜率", "总收益率", "最大单笔盈利", "最大单笔亏损", "平均收益率",
+    "胜率", "总收益额", "总收益率", "最大单笔盈利", "最大单笔亏损", "平均收益率",
 ]
 
-TRADE_COLUMNS = [
-    "股票代码", "名称", "买入日期", "卖出日期", "买入价格",
-    "卖出价格", "收益率", "卖出原因", "买入原因",
+DEFAULT_INITIAL_CAPITAL = 1_000_000.0
+
+DAY_COLUMNS = ["日期", "总资产", "现金", "持仓金额", "当日收益率",
+               "收益额", "累计收益率", "累计收益额", "持仓股票数"]
+
+HOLDING_COLUMNS = [
+    "股票代码", "名称", "买入日期", "卖出日期", "买入价格/股数",
+    "卖出价格/股数", "开盘价格", "收盘价格", "当日收益率", "持有收益率",
+    "卖出原因", "买入原因",
 ]
 
 # 配置文件中可调的策略注册表：短名 -> 类名
@@ -97,6 +104,11 @@ def load_data(db_path: str, start_time: str, end_time: str,
         return df
 
     df["date"] = pd.to_datetime(df["date"])
+    # 历史数据遗留：旧版下载脚本曾把 tradeStatus='1' 误存为 name
+    # （见 fix_stock_names.py），无有效名称时退回股票代码展示
+    bad_name = (df["name"].isna()
+                | df["name"].astype(str).str.strip().isin(("", "1", "0")))
+    df.loc[bad_name, "name"] = df.loc[bad_name, "ticker"]
     if limit and limit > 0:
         tickers = sorted(df["ticker"].unique())[:limit]
         df = df[df["ticker"].isin(tickers)]
@@ -107,11 +119,27 @@ def load_data(db_path: str, start_time: str, end_time: str,
 # 统计
 # ----------------------------------------------------------------------
 
-def compute_overview(trades: List[Trade], stock_count: int) -> Dict[str, float]:
+def compute_overview(trades: List[Trade], stock_count: int,
+                     initial_capital: float = 0.0,
+                     total_pnl: Optional[float] = None) -> Dict[str, float]:
+    """
+    概览统计。总收益额 / 总收益率为账户口径：total_pnl = 已实现盈亏
+    （各笔 (卖出价 − 买入价) × 卖出量）+ 期末未平仓浮盈（按期末前最近收盘），
+    总收益率 = total_pnl / initial_capital，与交易明细日表的累计收益额 /
+    累计收益率（末日值）完全一致。未传 total_pnl 时退回信号口径
+    （各笔收益率之和，仅用于无账户信息的场景）。
+    """
     closed = [t for t in trades if t.return_pct is not None]
     returns = [t.return_pct for t in closed]
     wins = sum(1 for r in returns if r > 0)
     losses = sum(1 for r in returns if r < 0)
+
+    if total_pnl is None:
+        total_pnl_v: float = float(np.sum(returns)) if returns else 0.0
+        total_ret: float = total_pnl_v
+    else:
+        total_pnl_v = round(float(total_pnl), 2)
+        total_ret = (float(total_pnl) / initial_capital) if initial_capital else 0.0
 
     return {
         "回测股票数": stock_count,
@@ -119,9 +147,8 @@ def compute_overview(trades: List[Trade], stock_count: int) -> Dict[str, float]:
         "盈利次数": wins,
         "亏损次数": losses,
         "胜率": wins / len(closed) if closed else 0.0,
-        # 每笔固定买入数量（等额定仓），累计收益率 = 各笔收益率之和；
-        # 用复利连乘会随交易笔数指数放大，与实际资金占用不符
-        "总收益率": float(np.sum(returns)) if returns else 0.0,
+        "总收益额": total_pnl_v,
+        "总收益率": total_ret,
         "最大单笔盈利": max(returns) if returns else 0.0,
         "最大单笔亏损": min(returns) if returns else 0.0,
         "平均收益率": float(np.mean(returns)) if returns else 0.0,
@@ -129,12 +156,273 @@ def compute_overview(trades: List[Trade], stock_count: int) -> Dict[str, float]:
 
 
 PCT_METRICS = {"胜率", "总收益率", "最大单笔盈利", "最大单笔亏损", "平均收益率"}
+MONEY_METRICS = {"总收益额"}
 
 
 def format_metric(key: str, value) -> str:
     if key in PCT_METRICS:
         return f"{value * 100:.2f}%"
+    if key in MONEY_METRICS:
+        return f"{value:,.2f}"
     return str(value)
+
+
+def account_total_pnl(trades: List[Trade], stock_data: Dict[str, pd.DataFrame],
+                      end_time) -> float:
+    """账户总盈亏 = 已实现盈亏（各笔 (卖出价 − 买入价) × 卖出量）
+    + 期末未平仓浮盈（按 end_time 前最近收盘价盯市），
+    与交易明细日表末日的累计收益额同口径。"""
+    end_ts = pd.Timestamp(end_time)
+    pnl = 0.0
+    for t in trades:
+        if not t.buy_time:
+            continue
+        if t.sell_price is not None:
+            pnl += (t.sell_price - t.buy_price) * (t.sell_amount or t.buy_amount)
+        else:
+            g = stock_data.get(t.ticker)
+            if g is None:
+                continue
+            gg = g[g["date"] <= end_ts]
+            if gg.empty:
+                continue
+            last_close = float(gg["close"].iloc[-1])
+            pnl += (last_close - t.buy_price) * t.buy_amount
+    return pnl
+
+
+def compute_equity(trades: List[Trade], stock_data: Dict[str, pd.DataFrame],
+                   start_time, end_time) -> Dict[str, list]:
+    """
+    账户盈亏曲线（等额定仓、逐日盯市）：浮盈按持仓期每日收盘价结算，
+    卖出日按实际卖出价计入已实现盈亏。返回日线、月末权益与月度盈亏。
+    """
+    start_ts, end_ts = pd.Timestamp(start_time), pd.Timestamp(end_time)
+    closed = [t for t in trades if t.return_pct is not None]
+    all_dates = sorted({d for df in stock_data.values() for d in df["date"]
+                        if start_ts <= d <= end_ts})
+    if not closed or not all_dates:
+        return {"daily": [], "monthly": [], "monthly_pnl": []}
+
+    dates_ns = np.array(all_dates, dtype="datetime64[ns]")
+    n = len(all_dates)
+    equity = np.zeros(n)
+    close_cache: Dict[str, np.ndarray] = {}
+
+    def close_arr(ticker: str) -> np.ndarray:
+        if ticker not in close_cache:
+            df = stock_data[ticker]
+            price_map = dict(zip(df["date"], df["close"]))
+            close_cache[ticker] = np.array(
+                [price_map.get(d, np.nan) for d in all_dates], dtype=float)
+        return close_cache[ticker]
+
+    for t in closed:
+        arr = close_arr(t.ticker)
+        i0 = int(np.searchsorted(dates_ns, np.datetime64(pd.Timestamp(t.buy_time))))
+        i1 = int(np.searchsorted(dates_ns, np.datetime64(pd.Timestamp(t.sell_time))))
+        i0 = min(max(i0, 0), n - 1)
+        i1 = min(max(i1, 0), n - 1)
+        if i1 < i0:
+            continue
+        # 买入日（含）至卖出日前一日：持仓盯市浮盈
+        seg = arr[i0:i1]
+        equity[i0:i1] += np.where(np.isnan(seg), 0.0, (seg - t.buy_price) * t.buy_amount)
+        # 卖出日：按实际卖出价计入已实现盈亏
+        equity[i1] += (t.sell_price - t.buy_price) * t.sell_amount
+
+    daily = [[d.strftime("%Y-%m-%d"), round(float(v), 2)]
+             for d, v in zip(all_dates, equity)]
+    series = pd.Series(equity, index=pd.to_datetime(all_dates))
+    monthly = series.resample("ME").last()
+    monthly_list = [[d.strftime("%Y-%m"), round(float(v), 2)]
+                    for d, v in monthly.items()]
+    monthly_pnl = [[d.strftime("%Y-%m"), round(float(v), 2)]
+                   for d, v in monthly.diff().items() if not np.isnan(v)]
+    return {"daily": daily, "monthly": monthly_list, "monthly_pnl": monthly_pnl}
+
+
+def compute_total_assets(days: List[dict]) -> Dict[str, list]:
+    """总资产变化曲线：日线（每日收盘总资产）与月线（月末总资产）。"""
+    if not days:
+        return {"assets_daily": [], "assets_monthly": []}
+    series = pd.Series([d["total_assets"] for d in days],
+                       index=pd.to_datetime([d["date"] for d in days]))
+    monthly = series.resample("ME").last()
+    return {
+        "assets_daily": [[d["date"], d["total_assets"]] for d in days],
+        "assets_monthly": [[i.strftime("%Y-%m"), round(float(v), 2)]
+                           for i, v in monthly.items()],
+    }
+
+
+# ----------------------------------------------------------------------
+# 逐日账户状态
+# ----------------------------------------------------------------------
+
+def compute_daily_account(trades: List[Trade], stock_data: Dict[str, pd.DataFrame],
+                          start_time, end_time,
+                          initial_capital: float = DEFAULT_INITIAL_CAPITAL
+                          ) -> List[dict]:
+    """
+    逐日账户状态（逐日盯市）：以 initial_capital 为初始资金，买入日按买入价
+    扣减现金、卖出日按卖出价回笼现金，持仓按当日收盘价（停牌沿用最近收盘价）
+    计入持仓金额。返回回测区间内每个交易日的账户快照（含当日持仓列表）。
+
+    配合 lib/account.py 的账户模拟（Engine.evaluate 会先对策略信号执行
+    资金/持仓约束再传入 trades），现金不会为负、持仓数不超过上限。
+
+    每个交易日一行：
+        {date, total_assets, cash, position_value,
+         day_return_pct, day_pnl, cum_return_pct, cum_pnl, holdings}
+    day_return_pct / day_pnl 为当日相对前一交易日总资产的收益率 / 收益额
+    （首日相对初始资金）；cum_* 为相对初始资金的累计口径。
+    holding 含 trade_idx（trades 列表下标，用于取 K 线图）、当日开盘/收盘价
+    （open_price / close_price，停牌无 K 线为 None）；
+    day_return_pct 为该股票当日收益率（买入日相对买入价、持仓中日间涨跌、
+    卖出日相对前收、当日回转取已实现收益），holding_return_pct 为持有期
+    累计收益率（卖出日为已实现）；卖出字段（sell_time/sell_price/
+    sell_amount/sell_reason）仅在卖出当天给出，其余持仓日为 None。
+    """
+    start_ts, end_ts = pd.Timestamp(start_time), pd.Timestamp(end_time)
+    initial_capital = float(initial_capital)
+
+    all_dates = sorted({d for df in stock_data.values() for d in df["date"]
+                        if start_ts <= d <= end_ts})
+
+    dated = []  # (idx, trade, buy_ts, sell_ts)
+    for idx, t in enumerate(trades):
+        if not t.buy_time:
+            continue
+        buy_ts = pd.Timestamp(t.buy_time)
+        sell_ts = pd.Timestamp(t.sell_time) if t.sell_time else None
+        dated.append((idx, t, buy_ts, sell_ts))
+    by_idx = {item[0]: item for item in dated}
+
+    buys_by_day: Dict[str, list] = {}
+    sells_by_day: Dict[str, list] = {}
+    for item in dated:
+        buys_by_day.setdefault(item[2].strftime("%Y-%m-%d"), []).append(item)
+        if item[3] is not None:
+            sells_by_day.setdefault(item[3].strftime("%Y-%m-%d"), []).append(item)
+
+    bar_cache: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    def bars(ticker: str):
+        if ticker not in bar_cache:
+            df = stock_data[ticker]
+            bar_cache[ticker] = (df["date"].values,
+                                 df["open"].values.astype(float),
+                                 df["close"].values.astype(float))
+        return bar_cache[ticker]
+
+    def close_on(ticker: str, d) -> float:
+        """ticker 在日期 d（含）之前最近一个交易日的收盘价，无则 nan。"""
+        dates_arr, _, closes = bars(ticker)
+        j = int(np.searchsorted(dates_arr, np.datetime64(d), side="right")) - 1
+        return float(closes[j]) if j >= 0 else float("nan")
+
+    def prev_close_on(ticker: str, d) -> float:
+        """ticker 在日期 d 之前最近一个交易日（严格在前）的收盘价，无则 nan。"""
+        dates_arr, _, closes = bars(ticker)
+        j = int(np.searchsorted(dates_arr, np.datetime64(d), side="left")) - 1
+        return float(closes[j]) if j >= 0 else float("nan")
+
+    def bar_on(ticker: str, d) -> Tuple[Optional[float], Optional[float]]:
+        """ticker 在日期 d 当日的 (开盘, 收盘)，当日无 K 线（停牌）为 (None, None)。"""
+        dates_arr, opens, closes = bars(ticker)
+        j = int(np.searchsorted(dates_arr, np.datetime64(d), side="left"))
+        if j < len(dates_arr) and dates_arr[j] == np.datetime64(d):
+            return float(opens[j]), float(closes[j])
+        return None, None
+
+    cash = initial_capital
+    open_idx = set()
+    days = []
+    prev_total = initial_capital
+    for d in all_dates:
+        ds = d.strftime("%Y-%m-%d")
+        # 先卖出回笼现金，再买入占用现金
+        for idx, t, _, _ in sells_by_day.get(ds, []):
+            cash += (t.sell_price or 0.0) * (t.sell_amount or 0.0)
+            open_idx.discard(idx)
+        for idx, t, _, sell_ts in buys_by_day.get(ds, []):
+            cash -= t.buy_price * t.buy_amount
+            if sell_ts != d:
+                open_idx.add(idx)
+            # 当日回转（买卖同日，如 Ross 日内交易）：收盘前已了结，
+            # 不计入持仓市值（卖出腿已在上面先卖阶段处理过现金）
+
+        position_value = 0.0
+        for idx in open_idx:
+            close = close_on(by_idx[idx][1].ticker, d)
+            if not np.isnan(close):
+                position_value += close * by_idx[idx][1].buy_amount
+
+        holdings = []
+        for idx, t, buy_ts, sell_ts in dated:
+            if buy_ts > d or (sell_ts is not None and sell_ts < d):
+                continue  # 尚未买入或已经卖出的交易日不在当日持仓中
+            sold_today = sell_ts == d
+            open_p, close_p = bar_on(t.ticker, d)
+            prev_close = prev_close_on(t.ticker, d)
+            if sold_today:
+                hold_ret = ((t.sell_price - t.buy_price) / t.buy_price
+                            if t.sell_price is not None and t.buy_price else None)
+                if buy_ts == d or np.isnan(prev_close) or not prev_close:
+                    # 当日回转（开盘买收盘卖）或无前收：以买入价为当日基准
+                    day_ret = hold_ret
+                else:
+                    day_ret = (t.sell_price - prev_close) / prev_close
+            else:
+                if close_p is None:
+                    # 停牌当日：沿用最近收盘价算持有收益率，当日收益率不显示
+                    close = close_on(t.ticker, d)
+                    day_ret = None
+                elif buy_ts == d:
+                    close = close_p
+                    day_ret = ((close_p - t.buy_price) / t.buy_price
+                               if t.buy_price else None)
+                else:
+                    close = close_p
+                    day_ret = ((close_p - prev_close) / prev_close
+                               if not np.isnan(prev_close) and prev_close else None)
+                hold_ret = ((close - t.buy_price) / t.buy_price
+                            if not np.isnan(close) and t.buy_price else None)
+            holdings.append({
+                "trade_idx": idx,
+                "ticker": t.ticker,
+                "name": t.name,
+                "buy_time": t.buy_time,
+                "buy_price": t.buy_price,
+                "buy_amount": t.buy_amount,
+                "buy_reason": t.buy_reason,
+                "sell_time": t.sell_time if sold_today else None,
+                "sell_price": t.sell_price if sold_today else None,
+                "sell_amount": t.sell_amount if sold_today else None,
+                "sell_reason": t.sell_reason if sold_today else None,
+                "open_price": open_p,
+                "close_price": close_p,
+                "day_return_pct": day_ret,
+                "holding_return_pct": hold_ret,
+            })
+
+        total = cash + position_value
+        day_pnl = total - prev_total
+        days.append({
+            "date": ds,
+            "total_assets": round(total, 2),
+            "cash": round(cash, 2),
+            "position_value": round(position_value, 2),
+            "day_return_pct": day_pnl / prev_total if prev_total else 0.0,
+            "day_pnl": round(day_pnl, 2),
+            "cum_return_pct": ((total - initial_capital) / initial_capital
+                               if initial_capital else 0.0),
+            "cum_pnl": round(total - initial_capital, 2),
+            "holdings": holdings,
+        })
+        prev_total = total
+    return days
 
 
 # ----------------------------------------------------------------------
@@ -200,9 +488,102 @@ def _candlestick_svg(window: pd.DataFrame, buy_time: str, sell_time: str,
     return "".join(parts)
 
 
+def _holding_window(df_stock: pd.DataFrame, buy_time: str, sell_time: str,
+                    pre_days: int = 10) -> pd.DataFrame:
+    """K 线窗口：买入前最多 pre_days 个交易日 ~ 卖出日（未卖出则到数据末尾）。"""
+    dates = df_stock["date"]
+    i0 = int(dates.searchsorted(pd.Timestamp(buy_time)))
+    start_pos = max(0, i0 - pre_days)
+    mask = dates >= dates.iloc[start_pos]
+    if sell_time:
+        mask &= dates <= pd.Timestamp(sell_time)
+    return df_stock[mask].reset_index(drop=True)
+
+
+def _holding_chart(t: Trade, stock_data: Dict[str, pd.DataFrame]) -> Optional[str]:
+    """单笔持仓的 K 线 SVG（持有期 + 买入前最多 10 个交易日）。"""
+    df_stock = stock_data.get(t.ticker)
+    if df_stock is None or not t.buy_time:
+        return None
+    window = _holding_window(df_stock, t.buy_time, t.sell_time)
+    return _candlestick_svg(window, t.buy_time, t.sell_time)
+
+
 # ----------------------------------------------------------------------
 # HTML 报告
 # ----------------------------------------------------------------------
+
+
+def _line_chart_svg(series: List[list], title: str,
+                    width: int = 430, height: int = 200) -> str:
+    """折线图 SVG：series = [[label, value], ...]（账户盈亏日线）。"""
+    if not series:
+        return f"<div class='chart-empty'>{html.escape(title)}：无数据</div>"
+    pad_l, pad_r, pad_t, pad_b = 56, 12, 24, 22
+    plot_w, plot_h = width - pad_l - pad_r, height - pad_t - pad_b
+    values = [v for _, v in series]
+    vmax, vmin = max(values), min(values)
+    span = (vmax - vmin) or 1.0
+    n = len(series)
+
+    def x(i: int) -> float:
+        return pad_l + plot_w * i / max(n - 1, 1)
+
+    def y(v: float) -> float:
+        return pad_t + (vmax - v) / span * plot_h
+
+    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, (_, v) in enumerate(series))
+    parts = [f'<svg viewBox="0 0 {width} {height}" class="eq-chart" xmlns="http://www.w3.org/2000/svg">']
+    parts.append(f'<text x="{width / 2}" y="14" font-size="11" text-anchor="middle" fill="#333">{html.escape(title)}</text>')
+    for j in range(4):
+        vv = vmin + span * j / 3
+        yy = y(vv)
+        parts.append(f'<line x1="{pad_l}" y1="{yy:.1f}" x2="{width - pad_r}" y2="{yy:.1f}" stroke="#eee"/>')
+        parts.append(f'<text x="{pad_l - 4}" y="{yy + 3:.1f}" font-size="8" text-anchor="end" fill="#999">{vv:,.0f}</text>')
+    parts.append(f'<polyline points="{pts}" fill="none" stroke="#1f77b4" stroke-width="1.5"/>')
+    for i in (0, n // 2, n - 1):
+        parts.append(f'<text x="{x(i):.1f}" y="{height - 6}" font-size="8" text-anchor="middle" fill="#999">{series[i][0]}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _bar_chart_svg(series: List[list], title: str,
+                   width: int = 430, height: int = 200) -> str:
+    """柱状图 SVG：series = [[label, value], ...]，红盈绿亏（账户盈亏月度）。"""
+    if not series:
+        return f"<div class='chart-empty'>{html.escape(title)}：无数据</div>"
+    pad_l, pad_r, pad_t, pad_b = 56, 12, 24, 22
+    plot_w, plot_h = width - pad_l - pad_r, height - pad_t - pad_b
+    vmax = max(max(v for _, v in series), 0.0)
+    vmin = min(min(v for _, v in series), 0.0)
+    span = (vmax - vmin) or 1.0
+    n = len(series)
+    slot = plot_w / n
+    bar_w = max(min(slot * 0.6, 30.0), 2.0)
+
+    def y(v: float) -> float:
+        return pad_t + (vmax - v) / span * plot_h
+
+    y0 = y(0.0)  # 零线
+    parts = [f'<svg viewBox="0 0 {width} {height}" class="eq-chart" xmlns="http://www.w3.org/2000/svg">']
+    parts.append(f'<text x="{width / 2}" y="14" font-size="11" text-anchor="middle" fill="#333">{html.escape(title)}</text>')
+    for j in range(4):
+        vv = vmin + span * j / 3
+        yy = y(vv)
+        parts.append(f'<line x1="{pad_l}" y1="{yy:.1f}" x2="{width - pad_r}" y2="{yy:.1f}" stroke="#eee"/>')
+        parts.append(f'<text x="{pad_l - 4}" y="{yy + 3:.1f}" font-size="8" text-anchor="end" fill="#999">{vv:,.0f}</text>')
+    parts.append(f'<line x1="{pad_l}" y1="{y0:.1f}" x2="{width - pad_r}" y2="{y0:.1f}" stroke="#bbb"/>')
+    for i, (_, v) in enumerate(series):
+        cx = pad_l + slot * i + slot / 2
+        top, bh = (y(v), y0 - y(v)) if v >= 0 else (y0, y(v) - y0)
+        color = "#e0342f" if v >= 0 else "#21a366"
+        parts.append(f'<rect x="{cx - bar_w / 2:.1f}" y="{top:.1f}" width="{bar_w:.1f}" height="{max(bh, 0.5):.1f}" fill="{color}"/>')
+    for i in (0, n // 2, n - 1):
+        cx = pad_l + slot * i + slot / 2
+        parts.append(f'<text x="{cx:.1f}" y="{height - 6}" font-size="8" text-anchor="middle" fill="#999">{series[i][0]}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
 
 _PAGE_CSS = """
 body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -216,21 +597,127 @@ table { border-collapse: collapse; width: 100%; font-size: 13px; background: #ff
 th, td { border: 1px solid #eee; padding: 6px 10px; text-align: center; white-space: nowrap; }
 th { background: #fafbfc; }
 .table-wrap { overflow-x: auto; }
-tr.trade-row { cursor: pointer; }
-tr.trade-row:hover { background: #f0f7ff; }
-tr.chart-row td { padding: 8px; background: #fcfcfd; text-align: left; }
-tr.chart-row.hidden { display: none; }
+tr.day-row, tr.holding-row { cursor: pointer; }
+tr.day-row:hover, tr.holding-row:hover { background: #f0f7ff; }
+tr.day-detail > td { padding: 8px 14px 14px; background: #fcfcfd; text-align: left; }
+tr.day-detail.hidden, tr.holding-chart.hidden { display: none; }
+table.holding-table { font-size: 12px; }
+table.holding-table th { background: #f5f7fa; font-weight: normal; color: #666; }
+tr.holding-chart td { padding: 8px; background: #fff; text-align: left; }
 .pos { color: #e0342f; } .neg { color: #21a366; }
 .toggle-hint { color: #bbb; font-size: 11px; font-weight: normal; margin-left: 8px; }
+.tabs { margin: 16px 0; border-bottom: 2px solid #e4e7ed; }
+.tabs button { background: none; border: none; padding: 10px 20px; font-size: 15px;
+               cursor: pointer; color: #666; border-bottom: 2px solid transparent;
+               margin-bottom: -2px; }
+.tabs button.active { color: #1f77b4; border-bottom-color: #1f77b4; font-weight: bold; }
+.charts { display: flex; gap: 16px; flex-wrap: wrap; margin: 12px 0; }
+.eq-chart { flex: 1; min-width: 380px; background: #fcfcfd; border: 1px solid #f0f0f0;
+            border-radius: 6px; }
+.chart-empty { flex: 1; min-width: 380px; color: #999; font-size: 12px; text-align: center;
+               padding: 40px 0; border: 1px dashed #eee; border-radius: 6px; }
+.pager { margin: 12px 0; text-align: center; font-size: 13px; color: #666; }
+.pager button { padding: 4px 14px; margin: 0 8px; border: 1px solid #dcdfe6;
+                background: #fff; border-radius: 4px; cursor: pointer; }
+.pager button:disabled { color: #c0c4cc; cursor: not-allowed; }
+.pager select { padding: 4px 8px; margin: 0 8px; border: 1px solid #dcdfe6;
+                background: #fff; border-radius: 4px; font-size: 13px; color: #666; }
 """
 
 _PAGE_JS = """
+// 策略标签页切换（每个策略一个独立报告）
+document.querySelectorAll('.tabs button').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    document.querySelectorAll('.tabs button').forEach(function (b) {
+      b.classList.toggle('active', b === btn);
+    });
+    document.querySelectorAll('.strategy-section').forEach(function (sec) {
+      sec.style.display = (sec.id === btn.dataset.target) ? 'block' : 'none';
+    });
+  });
+});
+
+// 每个策略交易明细按月分页：上一月 / 下一月按钮 + 月份下拉框跳转，
+// 每个月显示其全部交易日的账户明细
+document.querySelectorAll('.strategy-section').forEach(function (sec) {
+  var units = Array.prototype.slice.call(sec.querySelectorAll('tbody.unit'));
+  var months = [];
+  units.forEach(function (u) {
+    var m = u.dataset.month;
+    if (months.indexOf(m) === -1) months.push(m);
+  });
+  var mi = 0;
+  var info = sec.querySelector('.pager .info');
+  var prev = sec.querySelector('.pager .prev');
+  var next = sec.querySelector('.pager .next');
+  var jump = sec.querySelector('.pager .month-jump');
+  months.forEach(function (m) {
+    var opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    jump.appendChild(opt);
+  });
+  function render() {
+    if (!months.length) {
+      info.textContent = '无数据';
+      prev.disabled = next.disabled = true;
+      jump.disabled = true;
+      return;
+    }
+    var cur = months[mi];
+    var count = 0;
+    units.forEach(function (u) {
+      var show = u.dataset.month === cur;
+      if (show) count++;
+      u.style.display = show ? 'table-row-group' : 'none';
+      if (!show) {  // 切换月时折叠展开的持仓明细与 K 线图
+        var d = u.querySelector('.day-detail');
+        if (d) d.classList.add('hidden');
+        u.querySelectorAll('.holding-chart').forEach(function (c) {
+          c.classList.add('hidden');
+        });
+      }
+    });
+    jump.value = cur;
+    info.textContent = cur + '（共 ' + count + ' 个交易日）';
+    prev.disabled = mi <= 0;
+    next.disabled = mi >= months.length - 1;
+  }
+  prev.addEventListener('click', function () { if (mi > 0) { mi--; render(); } });
+  next.addEventListener('click', function () { if (mi < months.length - 1) { mi++; render(); } });
+  jump.addEventListener('change', function () {
+    var idx = months.indexOf(jump.value);
+    if (idx !== -1) { mi = idx; render(); }
+  });
+  render();
+});
+
+// 点击交易日行展开 / 折叠当日持仓明细；点击持仓行展开 / 折叠 K 线图
+// （K 线图按交易去重存放在隐藏的 chart-pool 中，首次点开时克隆到行内）
 document.addEventListener('click', function (e) {
-  var row = e.target.closest('tr.trade-row');
-  if (!row) return;
-  var chart = row.nextElementSibling;
-  if (chart && chart.classList.contains('chart-row')) {
-    chart.classList.toggle('hidden');
+  var hrow = e.target.closest('tr.holding-row');
+  if (hrow) {
+    var chartRow = hrow.nextElementSibling;
+    if (chartRow && chartRow.classList.contains('holding-chart')) {
+      var cell = chartRow.querySelector('.chart-cell');
+      if (cell && !cell.hasChildNodes()) {
+        var sec = hrow.closest('.strategy-section');
+        var src = sec.querySelector(".chart-src[data-trade='" + cell.dataset.trade + "']");
+        if (src) {
+          cell.appendChild(src.firstElementChild.cloneNode(true));
+        } else {
+          cell.innerHTML = "<span class='desc'>（图表已省略，持仓记录过多）</span>";
+        }
+      }
+      chartRow.classList.toggle('hidden');
+    }
+    return;
+  }
+  var drow = e.target.closest('tr.day-row');
+  if (!drow) return;
+  var detail = drow.nextElementSibling;
+  if (detail && detail.classList.contains('day-detail')) {
+    detail.classList.toggle('hidden');
   }
 });
 """
@@ -246,65 +733,153 @@ def _render_overview(overview: Dict[str, float]) -> str:
     return f"<div class='table-wrap'>{table}</div>"
 
 
-def _render_trades(trades: List[Trade], stock_data: Dict[str, pd.DataFrame],
-                   max_charts: int = 0) -> str:
-    """渲染交易明细表；max_charts > 0 时只为前 max_charts 笔交易嵌入 K 线图。"""
-    rows = []
-    for idx, t in enumerate(trades):
-        r = t.return_pct
-        ret_str = f"{r * 100:+.2f}%" if r is not None else "-"
-        ret_cls = "pos" if (r or 0) > 0 else "neg"
-        esc = html.escape
-        rows.append(
-            f"<tr class='trade-row'>"
-            f"<td>{esc(t.ticker)}</td><td>{esc(t.name)}</td>"
-            f"<td>{esc(t.buy_time or '-')}</td><td>{esc(t.sell_time or '-')}</td>"
-            f"<td>{t.buy_price:.2f}</td>"
-            f"<td>{f'{t.sell_price:.2f}' if t.sell_price is not None else '-'}</td>"
-            f"<td class='{ret_cls}'>{ret_str}</td>"
-            f"<td>{esc(t.sell_reason or '-')}</td><td>{esc(t.buy_reason or '-')}</td>"
+def _render_daily_table(days: List[dict], trades: List[Trade],
+                        stock_data: Dict[str, pd.DataFrame],
+                        max_charts: int = 0) -> str:
+    """渲染按交易日的账户明细表（每个交易日一个 tbody 单元，带 data-month
+    供前端按月分页）：首列行为 总资产/现金/持仓金额/收益率/持仓股票数；
+    点击行展开当日持仓明细表（每只股票一行，卖出字段仅在卖出当天有值），
+    再点击持仓行展开 K 线图。
+    K 线图按交易去重后集中放在隐藏的 chart-pool 中（同一笔交易在持仓期内
+    每天点开都是同一张图），点击时克隆到对应位置；max_charts > 0 时只为前
+    max_charts 笔交易嵌入 K 线图。"""
+    esc = html.escape
+    charts_left: Optional[int] = max_charts if max_charts > 0 else None
+    chart_pool: Dict[int, str] = {}
+    units = []
+    for day in days:
+        def money_cls(v: float) -> str:
+            return "pos" if v > 0 else ("neg" if v < 0 else "")
+
+        day_row = (
+            f"<tr class='day-row'>"
+            f"<td>{day['date']}</td>"
+            f"<td>{day['total_assets']:,.2f}</td>"
+            f"<td>{day['cash']:,.2f}</td>"
+            f"<td>{day['position_value']:,.2f}</td>"
+            f"<td class='{money_cls(day['day_return_pct'])}'>{day['day_return_pct'] * 100:+.2f}%</td>"
+            f"<td class='{money_cls(day['day_pnl'])}'>{day['day_pnl']:,.2f}</td>"
+            f"<td class='{money_cls(day['cum_return_pct'])}'>{day['cum_return_pct'] * 100:+.2f}%</td>"
+            f"<td class='{money_cls(day['cum_pnl'])}'>{day['cum_pnl']:,.2f}</td>"
+            f"<td>{len(day['holdings'])}</td>"
             f"</tr>"
         )
 
-        # 折叠的 K 线图：买入前 ~15 天 ~ 卖出后 ~15 天
-        chart = None
-        if max_charts <= 0 or idx < max_charts:
-            df_stock = stock_data.get(t.ticker)
-            if df_stock is not None and t.buy_time:
-                mask = df_stock["date"] >= pd.Timestamp(t.buy_time) - pd.Timedelta(days=15)
-                if t.sell_time:
-                    mask &= df_stock["date"] <= pd.Timestamp(t.sell_time) + pd.Timedelta(days=15)
-                chart = _candlestick_svg(df_stock[mask].reset_index(drop=True),
-                                         t.buy_time, t.sell_time)
-        if chart is None:
-            chart = "<span class='desc'>（图表已省略，交易笔数过多）</span>"
-        rows.append(
-            f"<tr class='chart-row hidden'><td colspan='{len(TRADE_COLUMNS)}'>{chart}</td></tr>"
+        holding_units = []
+        for h in day["holdings"]:
+            idx = h["trade_idx"]
+            dret = h["day_return_pct"]
+            hret = h["holding_return_pct"]
+            dret_str = f"{dret * 100:+.2f}%" if dret is not None else "-"
+            hret_str = f"{hret * 100:+.2f}%" if hret is not None else "-"
+            buy_pa = f"{h['buy_price']:.2f} / {h['buy_amount']:,.0f}"
+            sell_pa = (f"{h['sell_price']:.2f} / {h['sell_amount']:,.0f}"
+                       if h["sell_time"] else "-")
+            open_str = f"{h['open_price']:.2f}" if h["open_price"] is not None else "-"
+            close_str = f"{h['close_price']:.2f}" if h["close_price"] is not None else "-"
+            hrow = (
+                f"<tr class='holding-row'>"
+                f"<td>{esc(h['ticker'])}</td><td>{esc(h['name'])}</td>"
+                f"<td>{esc(h['buy_time'] or '-')}</td>"
+                f"<td>{esc(h['sell_time'] or '-')}</td>"
+                f"<td>{buy_pa}</td><td>{sell_pa}</td>"
+                f"<td>{open_str}</td><td>{close_str}</td>"
+                f"<td class='{money_cls(dret or 0.0)}'>{dret_str}</td>"
+                f"<td class='{money_cls(hret or 0.0)}'>{hret_str}</td>"
+                f"<td>{esc(h['sell_reason'] or '-')}</td>"
+                f"<td>{esc(h['buy_reason'] or '-')}</td>"
+                f"</tr>"
+            )
+            if (charts_left is None or charts_left > 0) and idx not in chart_pool:
+                chart = _holding_chart(trades[idx], stock_data)
+                if chart is not None:
+                    chart_pool[idx] = chart
+                    if charts_left is not None:
+                        charts_left -= 1
+            holding_units.append(
+                f"<tbody class='holding-unit'>{hrow}"
+                f"<tr class='holding-chart hidden'>"
+                f"<td colspan='{len(HOLDING_COLUMNS)}'>"
+                f"<div class='chart-cell' data-trade='{idx}'></div></td></tr>"
+                f"</tbody>"
+            )
+        if holding_units:
+            holdings_table = (
+                f"<table class='holding-table'>"
+                f"<thead><tr>{''.join(f'<th>{c}</th>' for c in HOLDING_COLUMNS)}</tr></thead>"
+                f"{''.join(holding_units)}</table>"
+            )
+        else:
+            holdings_table = "<span class='desc'>当日无持仓</span>"
+        detail_row = (
+            f"<tr class='day-detail hidden'>"
+            f"<td colspan='{len(DAY_COLUMNS)}'>{holdings_table}</td></tr>"
         )
+        units.append(
+            f"<tbody class='unit' style='display:none' data-month='{day['date'][:7]}'>"
+            f"{day_row}{detail_row}</tbody>")
 
-    header = "".join(f"<th>{c}</th>" for c in TRADE_COLUMNS)
-    table = f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
-    return f"<div class='table-wrap'>{table}</div>"
+    pool = (f"<div class='chart-pool' style='display:none'>"
+            + "".join(f"<div class='chart-src' data-trade='{i}'>{svg}</div>"
+                      for i, svg in chart_pool.items())
+            + "</div>")
+    header = "".join(f"<th>{c}</th>" for c in DAY_COLUMNS)
+    table = f"<table><thead><tr>{header}</tr></thead>{''.join(units)}</table>"
+    pager = ("<div class='pager'><button class='prev'>&lt; 上一月</button>"
+             "<select class='month-jump'></select>"
+             "<span class='info'></span>"
+             "<button class='next'>下一月 &gt;</button></div>")
+    return f"<div class='table-wrap'>{table}</div>{pager}{pool}"
 
 
 def generate_report(results: Dict[str, dict], output_path: str,
-                    max_charts: int = 0) -> str:
+                    max_charts: int = 0, start_time=None, end_time=None,
+                    initial_capital: float = DEFAULT_INITIAL_CAPITAL) -> str:
     """
     生成 HTML 报告。results 格式:
         {策略名: {"overview": {...}, "trades": [Trade...], "stock_data": {ticker: df}}}
-    max_charts > 0 时，只为每个策略的前 max_charts 笔交易嵌入 K 线图，
-    避免全市场回测时报告体积爆炸。
+    每个策略一个标签页（独立报告），页首为概览 + 账户盈亏日/月图，
+    交易明细按月分页显示（每月一页，支持上一月/下一月及月份下拉跳转；
+    点击行展开当日持仓明细，再点击持仓行展开 K 线图）；
+    max_charts > 0 时只为前 max_charts 笔交易嵌入 K 线图（同一笔交易在持仓期内
+    共用同一张图）。
+    传入 start_time / end_time 时渲染账户盈亏曲线，否则跳过。
     """
+    tabs = []
     sections = []
-    for name, data in results.items():
+    for si, (name, data) in enumerate(results.items()):
         overview_html = _render_overview(data["overview"])
-        trades_html = _render_trades(data["trades"], data["stock_data"],
-                                     max_charts=max_charts)
-        hint = "<span class='toggle-hint'>(点击行展开 K 线图)</span>"
+        days = compute_daily_account(data["trades"], data["stock_data"],
+                                     start_time, end_time,
+                                     initial_capital=initial_capital)
+        charts_html = ""
+        if start_time and end_time:
+            eq = compute_equity(data["trades"], data["stock_data"],
+                                start_time, end_time)
+            ta = compute_total_assets(days)
+            charts_html = (
+                f"<div class='charts'>"
+                f"{_line_chart_svg(eq['daily'], '账户盈亏（日线）')}"
+                f"{_bar_chart_svg(eq['monthly_pnl'], '账户盈亏（月度）')}"
+                f"{_line_chart_svg(ta['assets_daily'], '总资产（日线）')}"
+                f"{_line_chart_svg(ta['assets_monthly'], '总资产（月线）')}"
+                f"</div>"
+            )
+        trades_html = _render_daily_table(days, data["trades"],
+                                          data["stock_data"],
+                                          max_charts=max_charts)
+        hint = ("<span class='toggle-hint'>"
+                "(点击交易日行展开当日持仓，点击持仓行展开 K 线图)</span>")
+        active = "active" if si == 0 else ""
+        display = "block" if si == 0 else "none"
+        tabs.append(
+            f"<button data-target='sec{si}' class='{active}'>{html.escape(name)}</button>"
+        )
         sections.append(
-            f"<div class='card'><h2>{html.escape(name)}{hint}</h2>"
+            f"<div class='card strategy-section' id='sec{si}' style='display:{display}'>"
+            f"<h2>{html.escape(name)}{hint}</h2>"
             f"<p class='desc'>{html.escape(data.get('description', ''))}</p>"
-            f"{overview_html}<h2>交易明细</h2>{trades_html}</div>"
+            f"{overview_html}{charts_html}<h2>交易明细（按月分页）</h2>{trades_html}</div>"
         )
 
     page = f"""<!DOCTYPE html>
@@ -317,6 +892,7 @@ def generate_report(results: Dict[str, dict], output_path: str,
 <body>
 <div class="container">
 <h1>策略回测报告</h1>
+<div class="tabs">{''.join(tabs)}</div>
 {''.join(sections)}
 </div>
 <script>{_PAGE_JS}</script>
@@ -333,11 +909,15 @@ def generate_report(results: Dict[str, dict], output_path: str,
 # ----------------------------------------------------------------------
 
 class Engine:
-    """对一组策略在相同数据区间上执行回测。"""
+    """对一组策略在相同数据区间上执行回测（含账户级资金/持仓约束模拟）。"""
 
-    def __init__(self, strategies: Optional[List[BaseStrategy]] = None) -> None:
+    def __init__(self, strategies: Optional[List[BaseStrategy]] = None,
+                 initial_capital: float = DEFAULT_INITIAL_CAPITAL,
+                 max_positions: int = 10) -> None:
         default_name = STRATEGY_REGISTRY["ma"]
         self.strategies = strategies if strategies is not None else [_instantiate(default_name)]
+        self.initial_capital = float(initial_capital)
+        self.max_positions = int(max_positions)
 
     def evaluate(self, df: pd.DataFrame, start_time: str, end_time: str) -> Dict[str, dict]:
         start_ts, end_ts = pd.Timestamp(start_time), pd.Timestamp(end_time)
@@ -353,15 +933,22 @@ class Engine:
         results: Dict[str, dict] = {}
         for strategy in self.strategies:
             print(f"[{strategy.name}] 开始回测 ({stock_count} 只股票)...")
-            trades: List[Trade] = []
+            signals: List[Trade] = []
             for ticker, g in stock_data.items():
                 if not (g["date"] >= start_ts).any() or not (g["date"] <= end_ts).any():
                     continue
-                trades.extend(strategy.run(g, start_ts, end_ts))
+                signals.extend(strategy.run(g, start_ts, end_ts))
+            # 账户模拟：卖出全执行；买入按 score 降序在资金/持仓约束下成交
+            trades, skipped = simulate_account(signals, stock_data, start_ts, end_ts,
+                                               self.initial_capital,
+                                               self.max_positions)
             trades.sort(key=lambda t: (t.buy_time or "", t.ticker))
 
-            overview = compute_overview(trades, stock_count)
-            print(f"[{strategy.name}] 交易 {overview['总交易次数']} 笔 | "
+            overview = compute_overview(
+                trades, stock_count, initial_capital=self.initial_capital,
+                total_pnl=account_total_pnl(trades, stock_data, end_ts))
+            print(f"[{strategy.name}] 信号 {len(signals)} 笔 -> 成交 "
+                  f"{overview['总交易次数']} 笔（资金/持仓限制跳过 {skipped} 笔）| "
                   f"胜率 {format_metric('胜率', overview['胜率'])} | "
                   f"总收益率 {format_metric('总收益率', overview['总收益率'])}")
 
@@ -382,17 +969,28 @@ class Engine:
 @register("engine")
 def main(db=DEFAULT_DB, start=None, end=None, output="strategy_report.html",
          warmup=120, limit=0, max_charts=1000,
-         strategies=None, conditions=None) -> None:
+         initial_capital=DEFAULT_INITIAL_CAPITAL, max_positions=10,
+         strategies=None, conditions=None,
+         serve=False, host="127.0.0.1", port=8000) -> None:
     """
     回测入口。所有参数在配置文件中设置（见 strategy_test.yaml），
     也可以用 key=value 在命令行覆盖：
         python -m lib.engine -c strategy_test.yaml engine.start=2025-01-01
+    serve=true 时启动 Web 服务（Vue 前端）展示报告，否则生成静态 HTML。
+    initial_capital 为账户初始资金；max_positions 为最大持仓股票数，
+    资金与仓位按策略买入倾向评分（Trade.score）优先配给高分信号，
+    保证现金不为负（lib/account.py）。
     """
     if not start or not end:
         raise SystemExit("请在配置文件中设置 engine.start / engine.end（回测起止日期 YYYY-MM-DD）")
 
     # 命令行 key=value 覆盖进来的值是字符串，数值参数统一转换
     warmup, limit, max_charts = int(warmup), int(limit), int(max_charts)
+    initial_capital = float(initial_capital)
+    max_positions = int(max_positions)
+    port = int(port)
+    if isinstance(serve, str):  # 命令行覆盖 "false"/"0" 等字符串时按布尔解析
+        serve = serve.lower() not in ("0", "false", "no", "")
     if isinstance(strategies, str):  # 命令行覆盖单值时按一个策略处理
         strategies = [strategies]
     strategy_names = list(strategies) if strategies else ["ma"]
@@ -402,10 +1000,19 @@ def main(db=DEFAULT_DB, start=None, end=None, output="strategy_report.html",
         print("数据库中没有数据，请先运行 download_data.py")
         return
 
-    engine = Engine(strategies=build_strategies(strategy_names, conditions))
+    engine = Engine(strategies=build_strategies(strategy_names, conditions),
+                    initial_capital=initial_capital, max_positions=max_positions)
     results = engine.evaluate(df, start, end)
-    path = generate_report(results, output, max_charts=max_charts)
-    print(f"报告已生成: {path}")
+
+    if serve:
+        from lib.server import serve as serve_report  # 延迟导入避免循环
+        serve_report(results, start, end, host, port,
+                     initial_capital=initial_capital)
+    elif output:
+        path = generate_report(results, output, max_charts=max_charts,
+                               start_time=start, end_time=end,
+                               initial_capital=initial_capital)
+        print(f"报告已生成: {path}")
 
 
 if __name__ == "__main__":

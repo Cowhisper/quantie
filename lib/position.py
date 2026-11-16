@@ -37,6 +37,9 @@ class FixedCapitalPosition(BasePosition):
 
     def __init__(self, capital: float = 10000.0, lot_size: int = 100) -> None:
         super().__init__()
+        # yacrs 命令行覆盖进来的值是字符串，统一转换
+        capital = float(capital)
+        lot_size = int(lot_size)
         if capital <= 0:
             raise ValueError(f"capital 必须为正数，got {capital}")
         if lot_size < 1:

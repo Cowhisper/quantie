@@ -25,6 +25,9 @@ class MovingAverageCrossStrategy(BaseStrategy):
 
     买入信号需满足 conditions 中附加的市场过滤条件
     （如 PriceRangeCondition 价格区间）；日期区间由 run 的回测窗口自动附加。
+
+    买入信号附带倾向评分（Trade.score，见 docs/strategy_mac.md##买入倾向排序）：
+    账户层（lib/account.py）在资金/持仓约束下按评分降序决定哪些信号成交。
     """
 
     name = "均线金叉策略"
@@ -87,6 +90,10 @@ class MovingAverageCrossStrategy(BaseStrategy):
                     amount = self.position.buy_amount(float(price))
                     if amount <= 0:
                         continue
+                    # 买入倾向评分（docs/strategy_mac.md##买入倾向排序）：金叉日快线
+                    # 相对慢线的乖离率，上穿动能越强评分越高（账户层按评分配资金/仓位）
+                    slow = float(slow_ma.iloc[i])
+                    score = ((float(fast_ma.iloc[i]) - slow) / slow) if slow else 0.0
                     trades.append(Trade(
                         ticker=ticker,
                         name=name,
@@ -94,6 +101,7 @@ class MovingAverageCrossStrategy(BaseStrategy):
                         buy_amount=amount,
                         buy_price=float(price),
                         buy_reason=self.BUY_REASONS["golden_cross"],
+                        score=score,
                     ))
                     position_open = True
             else:

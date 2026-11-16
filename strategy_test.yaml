@@ -6,11 +6,16 @@
 engine:
   db: a_stock_daily.db          # 数据库路径
   start: "2025-01-01"           # 回测开始日期（必填）
-  end: "2025-06-30"             # 回测结束日期（必填）
-  output: strategy_report.html  # 输出报告路径
+  end: "2026-11-15"             # 回测结束日期（必填）
+  output: strategy_report.html  # serve=false 时生成的静态报告路径
   warmup: 120                   # 指标预热天数
+  serve: true                   # true=启动 Web 服务（Vue 交互报告）；false=只生成静态 HTML
+  host: "127.0.0.1"
+  port: 8000
   limit: 0                      # 只回测前 N 只股票（0=全部；排序靠前的多为指数）
-  max_charts: 1000              # 每笔交易嵌入 K 线图的数量上限
+  max_charts: 1000              # 每个策略嵌入 K 线图的交易数量上限（同一笔交易持仓期内共用一张图）
+  initial_capital: 100000      # 账户初始资金（交易明细的总资产/现金/持仓金额从这笔资金起算）
+  max_positions: 10            # 最大持仓股票数；资金与仓位按策略买入倾向评分优先配给高分信号，现金保证不为负
   strategies: [ma, ross]        # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go）
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
     ma: [PriceRangeCondition]

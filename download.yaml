@@ -1,0 +1,34 @@
+# 用法: python download_data.py -c download.yaml
+# 命令行覆盖任意配置项:
+#   python download_data.py -c download.yaml download.end=2026-11-15 download.all=true
+
+# 数据下载参数（对应 download_data.py 的 main，段名 = download）
+download:
+  db: a_stock_daily.db      # 数据库路径
+  start: "2024-01-01"       # 下载起始日期（首次下载 / 全量刷新时生效）
+  end: null                 # 下载结束日期（null = 昨天）
+  all: false                # true=下载全 A 股；false=下载下方 stocks 股票池
+  full_refresh: false       # true=忽略已有数据，重新下载全部历史
+  dry_run: false            # true=只打印每只股票将下载的区间，不联网下载、不写入
+  sleep: 0                  # 每只股票下载后的间隔秒数（0=不等待；baostock 不限流）
+  stocks:                   # 核心股票池（all=false 时生效），[代码, 名称, 行业]
+    - [sh.600519, 贵州茅台, 白酒]
+    - [sz.002594, 比亚迪, 新能源]
+    - [sz.300750, 宁德时代, 电池]
+    - [sz.000858, 五粮液, 白酒]
+    - [sh.601318, 中国平安, 保险]
+    - [sh.600036, 招商银行, 银行]
+    - [sz.000333, 美的集团, 家电]
+    - [sh.600900, 长江电力, 电力]
+    - [sz.002415, 海康威视, 安防]
+    - [sh.601012, 隆基绿能, 光伏]
+    - [sh.600276, 恒瑞医药, 医药]
+    - [sz.000001, 平安银行, 银行]
+    - [sz.300059, 东方财富, 券商]
+    - [sh.601888, 中国中免, 免税]
+    - [sz.002230, 科大讯飞, AI]
+    - [sh.600030, 中信证券, 券商]
+    - [sz.000568, 泸州老窖, 白酒]
+    - [sz.002714, 牧原股份, 养殖]
+    - [sh.601899, 紫金矿业, 有色]
+    - [sz.300760, 迈瑞医疗, 医疗器械]
