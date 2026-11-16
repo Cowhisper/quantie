@@ -2,11 +2,13 @@
 
 import html
 import os
+import re
 import sqlite3
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from openpyxl import Workbook
 from yacrs import _C, cli, configurable, register
 
 import lib  # noqa: F401  import lib 即触发所有策略/条件的 yacrs 注册
@@ -905,6 +907,86 @@ def generate_report(results: Dict[str, dict], output_path: str,
 
 
 # ----------------------------------------------------------------------
+# 交易明细 Excel 导出
+# ----------------------------------------------------------------------
+
+TRADE_COLUMNS = ["策略", "股票代码", "股票名称", "买入日期", "买入价格", "买入数量",
+                 "买入原因", "买入开盘价", "买入收盘价", "买入当日收益率",
+                 "卖出日期", "卖出价格", "卖出数量", "卖出原因",
+                 "持有收益率", "收益额", "评分"]
+
+
+def _sheet_names(names: List[str]) -> Dict[str, str]:
+    """策略名 -> 合法且互不重复的 sheet 名
+    （Excel 限制：不超过 31 字符，不含 []:*?/\\）。"""
+    used = set()
+    out: Dict[str, str] = {}
+    for name in names:
+        base = re.sub(r"[\[\]:*?/\\]", "_", name)[:31] or "sheet"
+        s, i = base, 2
+        while s in used:
+            suffix = f"_{i}"
+            s = base[:31 - len(suffix)] + suffix
+            i += 1
+        used.add(s)
+        out[name] = s
+    return out
+
+
+def _buy_day_bar(t: Trade, stock_data: Dict[str, pd.DataFrame]
+                 ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """买入日当日的 (开盘, 收盘, 当日收益率)；当日无 K 线（停牌）或无买入日时
+    返回 (None, None, None)。当日收益率 = (买入日收盘 − 买入价) / 买入价。"""
+    df = stock_data.get(t.ticker)
+    if df is None or not t.buy_time:
+        return None, None, None
+    row = df[df["date"] == pd.Timestamp(t.buy_time)]
+    if row.empty:
+        return None, None, None
+    open_p = float(row["open"].iloc[0])
+    close_p = float(row["close"].iloc[0])
+    day_ret = ((close_p - t.buy_price) / t.buy_price) if t.buy_price else None
+    return open_p, close_p, day_ret
+
+
+def export_trades_xlsx(results: Dict[str, dict], path: str) -> str:
+    """把每个策略的成交交易导出为一个 Excel 工作簿：每个策略一个 sheet，
+    每笔交易一行（列见 TRADE_COLUMNS），供后续分析。serve / 静态报告两种
+    模式都调用本函数，产出内容只取决于回测结果，因此完全一致。
+    持有收益率 / 买入当日收益率为小数（如 0.0835 = 8.35%），未平仓交易为空；
+    收益额 = (卖出价 − 买入价) × 卖出数量，未平仓为空。"""
+    wb = Workbook()
+    sheet_names = _sheet_names(list(results))
+    first = True
+    for name, data in results.items():
+        ws = wb.active if first else wb.create_sheet()
+        first = False
+        ws.title = sheet_names[name]
+        ws.append(TRADE_COLUMNS)
+        stock_data = data["stock_data"]
+        for t in data["trades"]:
+            pnl = ((t.sell_price - t.buy_price) * (t.sell_amount or t.buy_amount)
+                   if t.sell_price is not None else None)
+            open_p, close_p, day_ret = _buy_day_bar(t, stock_data)
+            ws.append([
+                name, t.ticker, t.name, t.buy_time or "",
+                t.buy_price, t.buy_amount, t.buy_reason,
+                open_p if open_p is not None else "",
+                close_p if close_p is not None else "",
+                round(day_ret, 6) if day_ret is not None else "",
+                t.sell_time or "",
+                t.sell_price if t.sell_price is not None else "",
+                t.sell_amount if t.sell_amount is not None else "",
+                t.sell_reason or "",
+                round(t.return_pct, 6) if t.return_pct is not None else "",
+                round(pnl, 2) if pnl is not None else "",
+                t.score,
+            ])
+    wb.save(path)
+    return path
+
+
+# ----------------------------------------------------------------------
 # 回测引擎
 # ----------------------------------------------------------------------
 
@@ -968,6 +1050,7 @@ class Engine:
 @cli("engine")
 @register("engine")
 def main(db=DEFAULT_DB, start=None, end=None, output="strategy_report.html",
+         trades_xlsx="trades.xlsx",
          warmup=120, limit=0, max_charts=1000,
          initial_capital=DEFAULT_INITIAL_CAPITAL, max_positions=10,
          strategies=None, conditions=None,
@@ -977,6 +1060,9 @@ def main(db=DEFAULT_DB, start=None, end=None, output="strategy_report.html",
     也可以用 key=value 在命令行覆盖：
         python -m lib.engine -c strategy_test.yaml engine.start=2025-01-01
     serve=true 时启动 Web 服务（Vue 前端）展示报告，否则生成静态 HTML。
+    两种模式都会把成交交易导出为 trades_xlsx：一个 Excel 工作簿，
+    每个策略一个 sheet，每笔交易一行（含买卖信息与持有收益；
+    空字符串表示不导出）。
     initial_capital 为账户初始资金；max_positions 为最大持仓股票数，
     资金与仓位按策略买入倾向评分（Trade.score）优先配给高分信号，
     保证现金不为负（lib/account.py）。
@@ -1003,6 +1089,10 @@ def main(db=DEFAULT_DB, start=None, end=None, output="strategy_report.html",
     engine = Engine(strategies=build_strategies(strategy_names, conditions),
                     initial_capital=initial_capital, max_positions=max_positions)
     results = engine.evaluate(df, start, end)
+
+    if trades_xlsx:
+        path = export_trades_xlsx(results, trades_xlsx)
+        print(f"交易明细已导出: {path}")
 
     if serve:
         from lib.server import serve as serve_report  # 延迟导入避免循环
