@@ -42,4 +42,5 @@ RossCameronGapAndGoStrategy:
   max_chase_pct: 0.05
   stop_loss_pct: 0.10
   trail_pct: 0.05
+  breakout_exit_days: 1    # 突破失败退出仅检查持仓前 N 个交易日（信号日低点参考线）
   max_hold_days: 5

@@ -84,7 +84,8 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
 
     出场（持仓次日起每日收盘依次检查，全仓卖出；A 股 T+1：买入当日不可卖出）：
     - 收盘跌破买入价 stop_loss_pct：止损
-    - 收盘跌破信号日最低价：突破失败，离场
+    - 收盘跌破信号日最低价：突破失败，离场（仅持仓前 breakout_exit_days 个交易日
+      检查，默认 1：跌破后该参考线失去意义，之后交给止损/移动止盈/时间止损）
     - 曾盈利后自持仓期最高价回撤 trail_pct：移动止盈（动能衰减）
     - 持仓满 max_hold_days 天：时间止损（其日内平仓的日线代理）
     - 回测区间结束：强制平仓
@@ -113,6 +114,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                  max_turn_pct: float = 15.0, max_signal_pct: float = 9.0,
                  max_chase_pct: float = 0.05,
                  stop_loss_pct: float = 0.10, trail_pct: float = 0.05,
+                 breakout_exit_days: int = 1,
                  max_hold_days: int = 5,
                  conditions: Optional[List[BaseCondition]] = None,
                  position: Optional[BasePosition] = None) -> None:
@@ -125,6 +127,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         self.max_chase_pct = max_chase_pct
         self.stop_loss_pct = stop_loss_pct
         self.trail_pct = trail_pct
+        self.breakout_exit_days = int(breakout_exit_days)
         self.max_hold_days = max_hold_days
         self.conditions = list(conditions) if conditions else []
         self.position = position if position is not None else FixedCapitalPosition()
@@ -230,7 +233,8 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                 sell_reason = None
                 if price < trade.buy_price * (1 - self.stop_loss_pct):
                     sell_reason = self.SELL_REASONS["stop_loss"]
-                elif price < signal_low:
+                elif (price < signal_low
+                      and hold_days - 1 <= self.breakout_exit_days):
                     sell_reason = self.SELL_REASONS["failed_breakout"]
                 elif (peak_price > trade.buy_price
                         and price < peak_price * (1 - self.trail_pct)):
