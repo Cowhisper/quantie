@@ -37,6 +37,10 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
     扫描条件（信号日，须在回测区间内）：
     - 跳空高开 ≥ gap_min_pct（默认 4%，其公开扫描标准，GapUpCondition）
     - 相对放量 ≥ rel_vol_min 倍 vol_window 日均量（默认 2 倍，RelativeVolumeCondition）
+    - 换手率 ≤ max_turn_pct（默认 15%）：高换手=拥挤交易，次日退潮概率大
+      （信号统计：turn>20% 次日止损率 26% vs turn≤3% 仅 9%）
+    - 信号日涨幅 ≤ max_signal_pct（默认 9%）：不追已涨停/接近涨停的延续，
+      动能透支后次日回归（涨幅 9%+ 的信号次日止损率 ~26%）
     - conditions 中附加的市场过滤条件
       （如 PriceRangeCondition 价格区间，对应其 $1-20 低价股偏好）
 
@@ -71,6 +75,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
 
     def __init__(self, gap_min_pct: float = 0.04, rel_vol_min: float = 2.0,
                  vol_window: int = 20,
+                 max_turn_pct: float = 15.0, max_signal_pct: float = 9.0,
                  max_chase_pct: float = 0.05,
                  stop_loss_pct: float = 0.05, trail_pct: float = 0.05,
                  max_hold_days: int = 5,
@@ -80,6 +85,8 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         self.gap_min_pct = gap_min_pct
         self.rel_vol_min = rel_vol_min
         self.vol_window = vol_window
+        self.max_turn_pct = float(max_turn_pct)
+        self.max_signal_pct = float(max_signal_pct)
         self.max_chase_pct = max_chase_pct
         self.stop_loss_pct = stop_loss_pct
         self.trail_pct = trail_pct
@@ -112,6 +119,12 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         signal_dates = set(df["date"])
         for cond in conditions:
             signal_dates &= set(cond(df)["date"])
+        # 买入点条件（docs/strategy_ross_cameron.md##买入）：信号日换手率与涨幅上限
+        # （超参，统计标定）——高换手的拥挤交易与涨停延续的动能透支都会显著提高
+        # 次日止损概率；turn/pctChg 缺失（NaN）的行不满足过滤
+        signal_dates &= set(df.loc[(df["turn"] <= self.max_turn_pct)
+                                   & (df["pctChg"] <= self.max_signal_pct),
+                                   "date"])
 
         ticker = df["ticker"].iloc[0]
         name = df["name"].iloc[0] if "name" in df.columns else ticker

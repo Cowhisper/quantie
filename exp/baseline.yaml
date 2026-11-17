@@ -37,6 +37,8 @@ RossCameronGapAndGoStrategy:
   gap_min_pct: 0.04
   rel_vol_min: 2.0
   vol_window: 20
+  max_turn_pct: 15.0        # 信号日换手率上限(%)：高换手=拥挤交易，次日退潮
+  max_signal_pct: 9.0       # 信号日涨幅上限(%)：不追涨停延续，动能透支
   max_chase_pct: 0.05
   stop_loss_pct: 0.05
   trail_pct: 0.05
