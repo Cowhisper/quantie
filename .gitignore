@@ -6,3 +6,7 @@ csv_export
 */__pycache__
 __pycache__
 *.xlsx
+
+# exp/ 下只入库 baseline.yaml，实验产物（交易明细/报告/实验记录）不入库
+exp/*
+!exp/baseline.yaml
