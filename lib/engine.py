@@ -282,9 +282,9 @@ def compute_daily_account(trades: List[Trade], stock_data: Dict[str, pd.DataFram
     holding 含 trade_idx（trades 列表下标，用于取 K 线图）、当日开盘/收盘价
     （open_price / close_price，停牌无 K 线为 None）；
     day_return_pct 为该股票当日收益率（买入日相对买入价、持仓中日间涨跌、
-    卖出日相对前收、当日回转取已实现收益），holding_return_pct 为持有期
-    累计收益率（卖出日为已实现）；卖出字段（sell_time/sell_price/
-    sell_amount/sell_reason）仅在卖出当天给出，其余持仓日为 None。
+    卖出日相对前收），holding_return_pct 为持有期累计收益率
+    （卖出日为已实现）；卖出字段（sell_time/sell_price/sell_amount/
+    sell_reason）仅在卖出当天给出，其余持仓日为 None。
     """
     start_ts, end_ts = pd.Timestamp(start_time), pd.Timestamp(end_time)
     initial_capital = float(initial_capital)
@@ -344,16 +344,14 @@ def compute_daily_account(trades: List[Trade], stock_data: Dict[str, pd.DataFram
     prev_total = initial_capital
     for d in all_dates:
         ds = d.strftime("%Y-%m-%d")
-        # 先卖出回笼现金，再买入占用现金
+        # 先卖出回笼现金，再买入占用现金（T+1：卖出日必晚于买入日，
+        # 由 lib/account.py 的账户模拟保证，买入日即占用仓位）
         for idx, t, _, _ in sells_by_day.get(ds, []):
             cash += (t.sell_price or 0.0) * (t.sell_amount or 0.0)
             open_idx.discard(idx)
-        for idx, t, _, sell_ts in buys_by_day.get(ds, []):
+        for idx, t, _, _ in buys_by_day.get(ds, []):
             cash -= t.buy_price * t.buy_amount
-            if sell_ts != d:
-                open_idx.add(idx)
-            # 当日回转（买卖同日，如 Ross 日内交易）：收盘前已了结，
-            # 不计入持仓市值（卖出腿已在上面先卖阶段处理过现金）
+            open_idx.add(idx)
 
         position_value = 0.0
         for idx in open_idx:
@@ -371,8 +369,8 @@ def compute_daily_account(trades: List[Trade], stock_data: Dict[str, pd.DataFram
             if sold_today:
                 hold_ret = ((t.sell_price - t.buy_price) / t.buy_price
                             if t.sell_price is not None and t.buy_price else None)
-                if buy_ts == d or np.isnan(prev_close) or not prev_close:
-                    # 当日回转（开盘买收盘卖）或无前收：以买入价为当日基准
+                if np.isnan(prev_close) or not prev_close:
+                    # 卖出日无前收（上市首日等）：以买入价为当日基准
                     day_ret = hold_ret
                 else:
                     day_ret = (t.sell_price - prev_close) / prev_close

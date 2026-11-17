@@ -10,7 +10,8 @@
 - 以「跳空高开 + 相对放量 + 价格区间」代理盘前扫描（流通盘/催化剂无数据），
   其中跳空与放量实现为内置扫描条件，价格等附加条件通过 conditions 注入
 - 信号日收盘确认，次日开盘买入，高开追价超过上限则放弃
-- 以「时间止损 + 区间末强制平仓」代理其日内平仓纪律
+- 以「时间止损 + 区间末强制平仓」代理其日内平仓纪律（A 股 T+1 下
+  买入当日不可卖出，持仓自次日起每日收盘检查离场条件）
 """
 
 from typing import List, Optional
@@ -42,7 +43,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
     入场：信号日次日以开盘价买入（买入量按固定本金仓位计算），
     次日相对信号日收盘价高开超过 max_chase_pct（默认 5%）则放弃（不追高）。
 
-    出场（持仓期间每日收盘依次检查，全仓卖出）：
+    出场（持仓次日起每日收盘依次检查，全仓卖出；A 股 T+1：买入当日不可卖出）：
     - 收盘跌破买入价 stop_loss_pct：止损
     - 收盘跌破信号日最低价：突破失败，离场
     - 曾盈利后自持仓期最高价回撤 trail_pct：移动止盈（动能衰减）
@@ -117,6 +118,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
 
         trades: List[Trade] = []
         position_open = False
+        entry_i = -1  # 买入日下标（信号日次日，开盘价成交），当日不可卖出（T+1）
 
         for i in range(len(df)):
             date = df["date"].iloc[i]
@@ -161,11 +163,14 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                     score=score,
                 ))
                 position_open = True
+                entry_i = i + 1
                 signal_low = float(low.iloc[i])
                 peak_price = entry_price
                 hold_days = 1
             else:
                 trade = trades[-1]
+                if i <= entry_i:
+                    continue  # 买入当日不可卖出（T+1），自次日起检查卖出
                 hold_days += 1
                 peak_price = max(peak_price, float(price))
 
