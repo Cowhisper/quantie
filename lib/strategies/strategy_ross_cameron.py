@@ -29,6 +29,41 @@ from lib.trade import Trade
 from .base import BaseStrategy
 
 
+def _gap_win(gap_pct: float) -> float:
+    """缺口幅度 -> 信号统计标定的分桶胜率（turn/涨幅过滤后的全量信号回测）。"""
+    if gap_pct <= 0.06:
+        return 0.419
+    if gap_pct <= 0.09:
+        return 0.386
+    if gap_pct <= 0.15:
+        return 0.415
+    return 0.389
+
+
+def _rv_win(rel_vol: float) -> float:
+    """相对放量倍数 -> 分桶胜率：2~5 倍温和放量最好，5~10 倍衰减。"""
+    if rel_vol <= 3.0:
+        return 0.416
+    if rel_vol <= 5.0:
+        return 0.409
+    if rel_vol <= 10.0:
+        return 0.392
+    return 0.400
+
+
+def _price_win(price: float) -> float:
+    """信号日收盘价 -> 分桶胜率：低价小盘最好（其原方法论 $1-20 低价股偏好）。"""
+    if price < 5.0:
+        return 0.472
+    if price < 10.0:
+        return 0.404
+    if price < 20.0:
+        return 0.400
+    if price < 50.0:
+        return 0.390
+    return 0.403
+
+
 @register()
 class RossCameronGapAndGoStrategy(BaseStrategy):
     """
@@ -158,13 +193,17 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                 if amount <= 0:
                     continue
 
-                # 买入倾向评分（docs/strategy_ross_cameron.md##买入倾向排序）：信号日
-                # 跳空幅度 × 相对放量倍数，缺口越大、放量越足评分越高
-                # （账户层按评分配资金/仓位）
+                # 买入倾向评分（docs/strategy_ross_cameron.md##买入倾向排序）：缺口 /
+                # 相对放量 / 股价三个特征的分桶胜率映射等权平均（标定自 turn/涨幅
+                # 过滤后的全量信号统计，以胜率为目标）——温和缺口 + 温和放量 + 低价
+                # 优先；旧公式（缺口 × 放量）与收益零/负相关，已废弃。
+                # 账户层按评分配资金/仓位
                 prev_close = float(close.iloc[i - 1]) if i > 0 else 0.0
                 gap_pct = (float(open_.iloc[i]) / prev_close - 1) if prev_close else 0.0
                 rv = rel_volume.iloc[i]
-                score = gap_pct * (float(rv) if not pd.isna(rv) else 0.0)
+                rv_v = float(rv) if not pd.isna(rv) else 0.0
+                score = (_gap_win(gap_pct) + _rv_win(rv_v)
+                         + _price_win(float(price))) / 3.0
 
                 trades.append(Trade(
                     ticker=ticker,
