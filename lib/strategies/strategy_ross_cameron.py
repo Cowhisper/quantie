@@ -112,7 +112,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                  vol_window: int = 20,
                  max_turn_pct: float = 15.0, max_signal_pct: float = 9.0,
                  max_chase_pct: float = 0.05,
-                 stop_loss_pct: float = 0.07, trail_pct: float = 0.05,
+                 stop_loss_pct: float = 0.10, trail_pct: float = 0.05,
                  max_hold_days: int = 5,
                  conditions: Optional[List[BaseCondition]] = None,
                  position: Optional[BasePosition] = None) -> None:
