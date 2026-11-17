@@ -83,7 +83,8 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
       （如 PriceRangeCondition 价格区间，对应其 $1-20 低价股偏好）
 
     入场：信号日次日以开盘价买入（买入量按固定本金仓位计算），
-    次日相对信号日收盘价高开超过 max_chase_pct（默认 5%）则放弃（不追高）。
+    次日相对信号日收盘价高开超过 max_chase_pct（默认 5%）则放弃（不追高），
+    低开超过 min_chase_pct（默认 -3%）同样放弃（缺口开盘即退潮，动能证伪）。
 
     出场（持仓次日起每日收盘依次检查，全仓卖出；A 股 T+1：买入当日不可卖出）：
     - 收盘跌破买入价 stop_loss_pct：止损
@@ -116,7 +117,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                  vol_window: int = 20,
                  max_turn_pct: float = 15.0, max_signal_pct: float = 9.0,
                  min_close_pos: float = 0.2,
-                 max_chase_pct: float = 0.05,
+                 min_chase_pct: float = -0.03, max_chase_pct: float = 0.05,
                  stop_loss_pct: float = 0.10, trail_pct: float = 0.05,
                  breakout_exit_days: int = 1,
                  max_hold_days: int = 5,
@@ -129,6 +130,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         self.max_turn_pct = float(max_turn_pct)
         self.max_signal_pct = float(max_signal_pct)
         self.min_close_pos = float(min_close_pos)
+        self.min_chase_pct = float(min_chase_pct)
         self.max_chase_pct = max_chase_pct
         self.stop_loss_pct = stop_loss_pct
         self.trail_pct = trail_pct
@@ -195,9 +197,12 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
                     continue
                 entry_price = float(next_open)
                 # 买入点条件（docs/strategy_ross_cameron.md##买入）：次日开盘突破买入；
-                # 负高开（低开）视为回调允许入场，只限制向上追高
+                # 高开超过 max_chase_pct 不追；低开超过 min_chase_pct（默认 -3%）说明
+                # 缺口已在开盘退潮、动能证伪，放弃（统计标定：低开>3% 的入场次日
+                # 失败率显著更高）
                 chase_pct = entry_price / float(price) - 1
-                if entry_date > end_ts or chase_pct > self.max_chase_pct:
+                if (entry_date > end_ts or chase_pct > self.max_chase_pct
+                        or chase_pct < self.min_chase_pct):
                     continue
 
                 # 买入量（docs/strategy_ross_cameron.md##买入）：固定本金，不足一手放弃

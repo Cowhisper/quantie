@@ -40,6 +40,7 @@ RossCameronGapAndGoStrategy:
   max_turn_pct: 15.0        # 信号日换手率上限(%)：高换手=拥挤交易，次日退潮
   max_signal_pct: 9.0       # 信号日涨幅上限(%)：不追涨停延续，动能透支
   min_close_pos: 0.2        # 信号日收盘位于当日振幅的位置下限：收低位=全天抛压
+  min_chase_pct: -0.03     # 次日开盘相对信号日收盘低开下限：低开超过则动能证伪
   max_chase_pct: 0.05
   stop_loss_pct: 0.10
   trail_pct: 0.05
