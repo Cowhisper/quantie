@@ -30,38 +30,38 @@ from .base import BaseStrategy
 
 
 def _gap_win(gap_pct: float) -> float:
-    """缺口幅度 -> 信号统计标定的分桶胜率（turn/涨幅过滤后的全量信号回测）。"""
+    """缺口幅度 -> 信号统计标定的分桶胜率（全过滤条件后的全量信号回测）。"""
     if gap_pct <= 0.06:
-        return 0.419
+        return 0.465
     if gap_pct <= 0.09:
-        return 0.386
+        return 0.404
     if gap_pct <= 0.15:
-        return 0.415
-    return 0.389
+        return 0.417
+    return 0.417
 
 
 def _rv_win(rel_vol: float) -> float:
-    """相对放量倍数 -> 分桶胜率：2~5 倍温和放量最好，5~10 倍衰减。"""
+    """相对放量倍数 -> 分桶胜率：2~3 倍温和放量最好，爆量最差。"""
     if rel_vol <= 3.0:
-        return 0.416
+        return 0.458
     if rel_vol <= 5.0:
-        return 0.409
+        return 0.440
     if rel_vol <= 10.0:
-        return 0.392
+        return 0.454
     return 0.400
 
 
 def _price_win(price: float) -> float:
     """信号日收盘价 -> 分桶胜率：低价小盘最好（其原方法论 $1-20 低价股偏好）。"""
     if price < 5.0:
-        return 0.472
+        return 0.490
     if price < 10.0:
-        return 0.404
+        return 0.441
     if price < 20.0:
-        return 0.400
+        return 0.461
     if price < 50.0:
-        return 0.390
-    return 0.403
+        return 0.439
+    return 0.413
 
 
 @register()
