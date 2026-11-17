@@ -76,6 +76,9 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
       （信号统计：turn>20% 次日止损率 26% vs turn≤3% 仅 9%）
     - 信号日涨幅 ≤ max_signal_pct（默认 9%）：不追已涨停/接近涨停的延续，
       动能透支后次日回归（涨幅 9%+ 的信号次日止损率 ~26%）
+    - 信号日收盘价位于当日振幅上半部（(close−low)/(high−low) ≥ min_close_pos，
+      默认 0.2）：收在低位=高开全天抛压，次日延续下跌概率大（统计：收在振幅
+      最低 20% 的信号次日 51% 跌破信号日低点，收在最高 20% 仅 16%）
     - conditions 中附加的市场过滤条件
       （如 PriceRangeCondition 价格区间，对应其 $1-20 低价股偏好）
 
@@ -112,6 +115,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
     def __init__(self, gap_min_pct: float = 0.04, rel_vol_min: float = 2.0,
                  vol_window: int = 20,
                  max_turn_pct: float = 15.0, max_signal_pct: float = 9.0,
+                 min_close_pos: float = 0.2,
                  max_chase_pct: float = 0.05,
                  stop_loss_pct: float = 0.10, trail_pct: float = 0.05,
                  breakout_exit_days: int = 1,
@@ -124,6 +128,7 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         self.vol_window = vol_window
         self.max_turn_pct = float(max_turn_pct)
         self.max_signal_pct = float(max_signal_pct)
+        self.min_close_pos = float(min_close_pos)
         self.max_chase_pct = max_chase_pct
         self.stop_loss_pct = stop_loss_pct
         self.trail_pct = trail_pct
@@ -157,12 +162,16 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         signal_dates = set(df["date"])
         for cond in conditions:
             signal_dates &= set(cond(df)["date"])
-        # 买入点条件（docs/strategy_ross_cameron.md##买入）：信号日换手率与涨幅上限
-        # （超参，统计标定）——高换手的拥挤交易与涨停延续的动能透支都会显著提高
-        # 次日止损概率；turn/pctChg 缺失（NaN）的行不满足过滤
+        # 买入点条件（docs/strategy_ross_cameron.md##买入）：信号日换手率 / 涨幅 /
+        # 收盘位置过滤（超参，统计标定）——高换手的拥挤交易、涨停延续的动能透支、
+        # 收在当日振幅低位的全天抛压，都会显著提高次日失败概率；
+        # turn/pctChg/收盘位置缺失（NaN，如一字零振幅）的行不满足过滤
         signal_dates &= set(df.loc[(df["turn"] <= self.max_turn_pct)
                                    & (df["pctChg"] <= self.max_signal_pct),
                                    "date"])
+        bar_range = df["high"] - df["low"]
+        close_pos = (df["close"] - df["low"]) / bar_range.where(bar_range > 0)
+        signal_dates &= set(df.loc[close_pos >= self.min_close_pos, "date"])
 
         ticker = df["ticker"].iloc[0]
         name = df["name"].iloc[0] if "name" in df.columns else ticker
