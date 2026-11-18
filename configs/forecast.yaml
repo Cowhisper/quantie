@@ -1,0 +1,61 @@
+# 用法: python forecast.py -c configs/forecast.yaml
+# 命令行覆盖任意配置项:
+#   python forecast.py -c configs/forecast.yaml forecast.strategies=[ma,ross] forecast.date=2026-11-18
+
+# 明日买入预测参数（对应 forecast.py 的 main，段名 = forecast）
+forecast:
+  db: a_stock_daily.db          # 数据库路径（下载与信号扫描共用）
+  download: true                # true=先执行增量行情下载（与 download_data.py 同一内核 lib/download.py）
+  start: "2024-01-01"           # 首次下载 / 全量刷新时的起始日期
+  end: null                     # 下载结束日期（null=今天；盘后运行可取到当日行情）
+  all: true                    # true=下载全 A 股；false=下载下方 stocks 股票池
+  full_refresh: false           # true=忽略已有数据，重新下载全部历史
+  sleep: 0                      # 每只股票下载后的间隔秒数（baostock 不限流）
+  stocks:                       # 核心股票池（all=false 时生效），[代码, 名称, 行业]；删除本项则用内置默认池
+    - [sh.600519, 贵州茅台, 白酒]
+    - [sz.002594, 比亚迪, 新能源]
+    - [sz.300750, 宁德时代, 电池]
+    - [sz.000858, 五粮液, 白酒]
+    - [sh.601318, 中国平安, 保险]
+    - [sh.600036, 招商银行, 银行]
+    - [sz.000333, 美的集团, 家电]
+    - [sh.600900, 长江电力, 电力]
+    - [sz.002415, 海康威视, 安防]
+    - [sh.601012, 隆基绿能, 光伏]
+    - [sh.600276, 恒瑞医药, 医药]
+    - [sz.000001, 平安银行, 银行]
+    - [sz.300059, 东方财富, 券商]
+    - [sh.601888, 中国中免, 免税]
+    - [sz.002230, 科大讯飞, AI]
+    - [sh.600030, 中信证券, 券商]
+    - [sz.000568, 泸州老窖, 白酒]
+    - [sz.002714, 牧原股份, 养殖]
+    - [sh.601899, 紫金矿业, 有色]
+    - [sz.300760, 迈瑞医疗, 医疗器械]
+  warmup: 120                   # 指标预热天数（加载信号日前多少天数据计算指标）
+  strategies: [ross]            # 要预测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go）
+  conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
+    ross: [PriceRangeCondition]
+  output_dir: forecast          # CSV 输出目录
+  date: null                    # 预测买入日 YYYY-MM-DD（null=明天）；CSV 命名为 {买入日}-{策略短名}.csv
+  max_positions: 10             # 每只策略最多输出的股票数（按评分降序取前 N，0=不限）
+
+# 各条件类的参数（条件用 yacrs @register 注册，段名 = 类名）
+PriceRangeCondition:
+  min_price: 1
+  max_price: 10000
+
+# 各策略类的参数（策略用 yacrs @register 注册，段名 = 类名）
+MovingAverageCrossStrategy:
+  fast_window: 5
+  slow_window: 20
+  stop_loss_pct: 0.08
+
+RossCameronGapAndGoStrategy:
+  gap_min_pct: 0.04
+  rel_vol_min: 2.0
+  vol_window: 20
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.05
+  trail_pct: 0.05
+  max_hold_days: 5

@@ -1,0 +1,54 @@
+# 每日任务（TASKS.md 流程：数据更新 → 预测 → 企业微信推送）
+# 用法:
+#   python daily_task.py -c configs/daily.yaml                      # 完整流程
+#   python daily_task.py -c configs/daily.yaml daily.push=false     # 完整流程，不推送
+#   python daily_task.py -c configs/daily.yaml daily.mode=push      # 手动触发推送
+#
+# 定时执行（crontab -e 添加，每天凌晨 02:00 开始，日志写入 daily.log）:
+#   0 2 * * * cd /Users/kurt/Repo/quantie && /Users/kurt/miniconda3/bin/python daily_task.py -c configs/daily.yaml >> daily.log 2>&1
+# 说明: 凌晨 02:00 昨日行情已完整，故 daily.end 默认为昨天；若盘后手动补跑
+# 想纳入当日行情，用 daily.end=<当天> 或直接用 forecast.py（其下载 end 默认当天）。
+
+# 每日任务参数（对应 daily_task.py 的 main，段名 = daily）
+daily:
+  mode: full                    # full=数据更新→预测→推送（定时）；push=只推送最新预测结果（手动触发）
+  push: true                    # full 模式跑完后是否推送
+  webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=8c9ca1ca-3f20-489c-969b-e60bfdf239cf"  # 企业微信机器人（TASKS.md）
+  max_retries: 5                # 下载失败重试轮数上限（TASKS.md：重试至全部成功；0=不限）
+  retry_sleep: 30               # 重试间隔秒数
+  # ---- 增量下载参数（语义与 download_data.py / forecast.py 一致）----
+  db: a_stock_daily.db          # 数据库路径（下载与信号扫描共用）
+  start: "2024-01-01"           # 首次下载 / 全量刷新时的起始日期
+  end: null                     # 下载结束日期（null=昨天；凌晨跑昨日数据已完整）
+  all: true                     # true=下载全 A 股；false=下载下方 stocks 股票池
+  full_refresh: false           # true=忽略已有数据，重新下载全部历史
+  sleep: 0                      # 每只股票下载后的间隔秒数（baostock 不限流）
+  # stocks:                     # 核心股票池（all=false 时生效），[代码, 名称, 行业]；缺省用 lib/download.py 内置默认池
+  # ---- 预测参数（语义与 forecast.py 一致）----
+  warmup: 120                   # 指标预热天数
+  strategies: [ross]            # 要预测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go）
+  conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
+    ross: [PriceRangeCondition]
+  output_dir: forecast          # 预测 CSV 输出目录（push 模式从这里读最新结果）
+  date: null                    # 预测买入日 YYYY-MM-DD（null=明天）
+  max_positions: 10             # 每只策略最多输出的股票数（按评分降序取前 N，0=不限）
+
+# 各条件类的参数（条件用 yacrs @register 注册，段名 = 类名）
+PriceRangeCondition:
+  min_price: 1
+  max_price: 10000
+
+# 各策略类的参数（策略用 yacrs @register 注册，段名 = 类名；取值同 exp/baseline.yaml 标定版）
+RossCameronGapAndGoStrategy:
+  gap_min_pct: 0.04
+  rel_vol_min: 2.0
+  vol_window: 20
+  max_turn_pct: 15.0
+  max_signal_pct: 9.0
+  min_close_pos: 0.2
+  min_chase_pct: -0.03
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.10
+  trail_pct: 0.05
+  breakout_exit_days: 1
+  max_hold_days: 5

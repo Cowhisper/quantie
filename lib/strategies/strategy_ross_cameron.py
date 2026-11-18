@@ -14,7 +14,7 @@
   买入当日不可卖出，持仓自次日起每日收盘检查离场条件）
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 from yacrs import register
@@ -139,6 +139,48 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         self.conditions = list(conditions) if conditions else []
         self.position = position if position is not None else FixedCapitalPosition()
 
+    def _signal_dates(self, df: pd.DataFrame, start_time, end_time
+                      ) -> Tuple[set, List[Tuple[str, int]]]:
+        """信号日集合（docs/strategy_ross_cameron.md##买入）：日期区间 + 跳空高开 +
+        相对放量 + 全部附加条件取交集，再过换手率/涨幅/收盘位置过滤；每个条件
+        都在完整 df 上计算，保证依赖历史数据的条件（如均量）不受影响。
+        同时返回逐阶段剩余行数 [(阶段名, 剩余行数), ...]，供 forecast 在
+        0 信号时拆解原因（阶段顺序即过滤顺序，逐阶段取日期交集）。"""
+        conditions = [DateRangeCondition(start_time, end_time),
+                      GapUpCondition(self.gap_min_pct),
+                      RelativeVolumeCondition(self.rel_vol_min, self.vol_window),
+                      *self.conditions]
+        signal_dates = set(df["date"])
+        # 换手率/涨幅过滤（统计标定）：高换手的拥挤交易、涨停延续的动能透支
+        # 都会显著提高次日失败概率；turn/pctChg 缺失（NaN）的行不满足过滤
+        filters: List[Tuple[str, pd.Series]] = [
+            (f"换手≤{self.max_turn_pct:g}% 且 涨幅≤{self.max_signal_pct:g}%",
+             (df["turn"] <= self.max_turn_pct)
+             & (df["pctChg"] <= self.max_signal_pct)),
+        ]
+        bar_range = df["high"] - df["low"]
+        close_pos = (df["close"] - df["low"]) / bar_range.where(bar_range > 0)
+        # 收盘位置过滤：收在当日振幅低位的全天抛压，次日延续下跌概率大；
+        # 一字零振幅（high=low）时 close_pos 为 NaN，不满足过滤
+        filters.append((f"收盘位于振幅上部≥{self.min_close_pos:g}",
+                        close_pos >= self.min_close_pos))
+
+        stages: List[Tuple[str, int]] = [("候选K线", len(df))]
+        for cond in conditions:
+            signal_dates &= set(cond(df)["date"])
+            stages.append((cond.description, len(signal_dates)))
+        for label, mask in filters:
+            signal_dates &= set(df.loc[mask, "date"])
+            stages.append((label, len(signal_dates)))
+        return signal_dates, stages
+
+    def signal_day_breakdown(self, df: pd.DataFrame, start_time, end_time
+                             ) -> List[Tuple[str, int]]:
+        """诊断接口（forecast 0 信号时调用）：返回逐阶段剩余信号日行数，
+        阶段与 run() 的信号判定完全一致（每阶段均在完整 df 上计算后取交集）。"""
+        _, stages = self._signal_dates(df, start_time, end_time)
+        return stages
+
     def run(self, df: pd.DataFrame, start_time, end_time) -> List[Trade]:
         end_ts = pd.Timestamp(end_time)
 
@@ -149,31 +191,11 @@ class RossCameronGapAndGoStrategy(BaseStrategy):
         close = df["close"]
         open_ = df["open"]
         low = df["low"]
-        volume = df["volume"]
         # 相对放量（与 RelativeVolumeCondition 同口径：当日量 / 过去 vol_window 日均量，不含当日）
-        prev_avg_volume = volume.shift(1).rolling(self.vol_window).mean()
-        rel_volume = volume / prev_avg_volume
+        prev_avg_volume = df["volume"].shift(1).rolling(self.vol_window).mean()
+        rel_volume = df["volume"] / prev_avg_volume
 
-        # 最低买入要求（docs/strategy_ross_cameron.md##买入）：日期区间 + 跳空高开 +
-        # 相对放量 + 全部附加条件取交集；每个条件都在完整 df 上计算，
-        # 保证依赖历史数据的条件（如均量）不受影响
-        conditions = [DateRangeCondition(start_time, end_time),
-                      GapUpCondition(self.gap_min_pct),
-                      RelativeVolumeCondition(self.rel_vol_min, self.vol_window),
-                      *self.conditions]
-        signal_dates = set(df["date"])
-        for cond in conditions:
-            signal_dates &= set(cond(df)["date"])
-        # 买入点条件（docs/strategy_ross_cameron.md##买入）：信号日换手率 / 涨幅 /
-        # 收盘位置过滤（超参，统计标定）——高换手的拥挤交易、涨停延续的动能透支、
-        # 收在当日振幅低位的全天抛压，都会显著提高次日失败概率；
-        # turn/pctChg/收盘位置缺失（NaN，如一字零振幅）的行不满足过滤
-        signal_dates &= set(df.loc[(df["turn"] <= self.max_turn_pct)
-                                   & (df["pctChg"] <= self.max_signal_pct),
-                                   "date"])
-        bar_range = df["high"] - df["low"]
-        close_pos = (df["close"] - df["low"]) / bar_range.where(bar_range > 0)
-        signal_dates &= set(df.loc[close_pos >= self.min_close_pos, "date"])
+        signal_dates, _ = self._signal_dates(df, start_time, end_time)
 
         ticker = df["ticker"].iloc[0]
         name = df["name"].iloc[0] if "name" in df.columns else ticker
