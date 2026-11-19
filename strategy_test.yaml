@@ -17,11 +17,12 @@ engine:
   max_charts: 1000              # 每个策略嵌入 K 线图的交易数量上限（同一笔交易持仓期内共用一张图）
   initial_capital: 100000      # 账户初始资金（交易明细的总资产/现金/持仓金额从这笔资金起算）
   max_positions: 10            # 最大持仓股票数；资金与仓位按策略买入倾向评分优先配给高分信号，现金保证不为负
-  strategies: [ma, ross, rsi2]    # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归）
+  strategies: [ma, ross, rsi2, jlaw]    # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归，jlaw=J Law VCP 多重优势）
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
     ma: [PriceRangeCondition]
     ross: [PriceRangeCondition]
     rsi2: [PriceRangeCondition]
+    jlaw: [PriceRangeCondition]
 
 # 各条件类的参数（条件用 yacrs @register 注册，段名 = 类名）
 # 示例给了一个接近"不限"的宽区间；当前库排序靠前的代码多为指数（价格数百至数千），
@@ -60,3 +61,37 @@ ConnorsRSI2ReversionStrategy:
   max_chase_pct: 0.05
   stop_loss_pct: 0.10
   max_hold_days: 10
+
+# J Law 多重优势交易系统 / VCP 突破回踩（说明文档见 docs/strategy_jlaw.md）：
+# Stage 2 趋势（MA50>MA200 向上）+ 催化涨幅 + VCP 逐次收缩 + 末段缩量后，
+# 放量突破 Pivot 或首次缩量回踩 20 日均线带买入；跌破均线带趁弱卖 / 固定止盈趁强卖
+# （warmup 需 ≥ 250：MA200 与 250 日高点需要约一年历史数据）
+JLawMultipleEdgeStrategy:
+  trend_fast: 50
+  trend_slow: 200
+  rally_window: 120
+  min_rally_pct: 0.30
+  base_window: 45
+  max_base_depth_pct: 0.30
+  contraction_recent: 10
+  contraction_prior: 20
+  contraction_shrink: 0.6
+  max_last_contraction_pct: 0.15
+  dryup_days: 5
+  dryup_ref: 20
+  volume_dry_ratio: 0.8
+  entry_mode: both           # breakout=放量突破 / pullback=缩量回踩均线带 / both
+  breakout_vol_mult: 1.5
+  pullback_window: 10
+  ma_zone: 20
+  ma_zone_pct: 0.02
+  pullback_vol_ratio: 0.8
+  min_amount: 100000000      # 20 日平均成交额 ≥ 1 亿元（流动性过滤）
+  skip_st: true
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.05        # 止损风险上限（原文 3%~5%）
+  stop_buffer_pct: 0.02      # 止损放多重优势区下沿下方约 2%
+  take_profit_pct: 0.20      # 趁强卖固定止盈（R:R 2~2.5 的日线近似）
+  exit_ma_window: 10         # 趁弱卖：跌破 10 日均线带离场
+  exit_ma_buffer_pct: 0.01
+  max_hold_days: 60
