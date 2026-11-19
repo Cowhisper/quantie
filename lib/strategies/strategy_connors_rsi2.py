@@ -64,8 +64,10 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
     扫描条件（信号日，须在回测区间内）：
     - 收盘价高于长期均线 trend_window（默认 200 日，原文规则：上升趋势中
       的回调才均值回归；下跌趋势中的超卖多是基本面恶化，继续阴跌概率大）
-    - RSI(rsi_window=2) < rsi_buy（默认 10，原文规则；RSI(2) 对单日
-      极端波动极灵敏，<10 表示近 2 日几乎单边下跌）
+    - RSI(rsi_window=2) < rsi_buy（默认 6，原文规则为 10；A 股实证探针
+      4~10 后取 6：胜率 ~60% 且收益接近持平，8~10 浅超卖区多为阴跌中继、
+      深端又被 rsi_floor 拦截，<6 信号过少且收益变差。RSI(2) 对单日
+      极端波动极灵敏，低读数表示近 2 日几乎单边下跌）
     - RSI(rsi_window) ≥ rsi_floor（默认 2；A 股实证：RSI(2)→0 多为连续
       跌停/基本面恶化的下跌飞刀，继续阴跌概率大，越深超卖评分越高的
       原文结论在 A 股个股上不成立，故设下限排除飞刀区）
@@ -104,7 +106,7 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
         "end_of_backtest": "回测区间结束，强制平仓",
     }
 
-    def __init__(self, rsi_window: int = 2, rsi_buy: float = 10.0,
+    def __init__(self, rsi_window: int = 2, rsi_buy: float = 6.0,
                  trend_window: int = 200, exit_ma_window: int = 5,
                  max_chase_pct: float = 0.05, stop_loss_pct: float = 0.10,
                  max_hold_days: int = 10,
