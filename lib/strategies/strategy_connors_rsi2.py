@@ -72,6 +72,8 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
     - 近 5 日累计跌幅不超过 max_fall5_pct（默认 25%；崩盘式下跌的
       超卖不是均值回归机会）
     - 非 ST/*ST 个股（skip_st，退市风险不符合均值回归前提）
+    - 信号日收盘跌幅未超过 9.5%（skip_limit_down，跌停/崩盘日的
+      "超卖"多是持续下跌的中继）
 
     入场：信号日次日以开盘价买入（买入量按固定本金仓位计算），
     次日高开超过 max_chase_pct（默认 5%）放弃——超卖反弹隔夜已兑现。
@@ -83,7 +85,9 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
     - 回测区间结束：强制平仓
 
     买入信号附带倾向评分（Trade.score，见 docs/strategy_connors_rsi2.md##买入倾向排序）：
-    账户层（lib/account.py）在资金/持仓约束下按评分降序决定哪些信号成交。
+    多因子加权（回调深度/波动率/趋势距离/RSI 甜点区/次日跳空），
+    与预期收益正相关；账户层（lib/account.py）在资金/持仓约束下按评分
+    降序决定哪些信号成交。
     """
 
     name = "Connors RSI(2) 超卖回归"
@@ -105,7 +109,7 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
                  max_chase_pct: float = 0.05, stop_loss_pct: float = 0.10,
                  max_hold_days: int = 10,
                  rsi_floor: float = 2.0, max_fall5_pct: float = 0.25,
-                 skip_st: bool = True,
+                 skip_st: bool = True, skip_limit_down: bool = True,
                  conditions: Optional[List[BaseCondition]] = None,
                  position: Optional[BasePosition] = None) -> None:
         super().__init__()
@@ -119,6 +123,7 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
         self.rsi_floor = rsi_floor
         self.max_fall5_pct = max_fall5_pct
         self.skip_st = skip_st
+        self.skip_limit_down = skip_limit_down
         self.conditions = list(conditions) if conditions else []
         self.position = position if position is not None else FixedCapitalPosition()
 
@@ -153,6 +158,10 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
         if self.skip_st:
             not_st = ~df["name"].astype(str).str.contains("ST", na=False)
             filters.append(("排除 ST/*ST 个股（退市风险，不符合均值回归前提）", not_st))
+        if self.skip_limit_down:
+            not_limit_down = close.pct_change() > -0.095
+            filters.append(("信号日收盘跌幅未超过 9.5%（排除跌停/崩盘日）",
+                            not_limit_down))
         for label, mask in filters:
             signal_dates &= set(df.loc[mask, "date"])
             stages.append((label, len(signal_dates)))
@@ -175,7 +184,10 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
         close = df["close"]
         open_ = df["open"]
         exit_ma = close.rolling(self.exit_ma_window).mean()
+        trend_ma = close.rolling(self.trend_window).mean()
         rsi = _rsi(close, self.rsi_window)
+        ret5 = close.pct_change(5)
+        vol20 = close.pct_change().rolling(20).std()
 
         signal_dates, _ = self._signal_dates(df, start_time, end_time)
 
@@ -213,12 +225,22 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
                 if amount <= 0:
                     continue
 
-                # 买入倾向评分（docs/strategy_connors_rsi2.md##买入倾向排序）：超卖深度
-                # 归一化 = (rsi_buy − RSI2) / rsi_buy。Connors 原文 RSI(2) 越低
-                # 预期收益越高（原文 <5 加仓规则的依据），故越深度超卖评分越高；
-                # 账户层按评分配资金/仓位
+                # 买入倾向评分（docs/strategy_connors_rsi2.md##买入倾向排序）：
+                # 多因子加权，与预期收益正相关（账户层按评分配资金/仓位）。
+                # baseline 实证：原"超卖深度"评分与收益负相关（最深的
+                # RSI(2)→0 多为下跌飞刀），改为 5 因子加权——
+                # 回调浅（近5日跌幅小）、低波动、贴近 MA200、RSI(2) 处
+                # 5.5 附近甜点区、次日小幅高开（反弹已启动）者优先。
                 r = float(rsi.iloc[i])
-                score = (self.rsi_buy - r) / self.rsi_buy
+                t_pullback = min(max((float(ret5.iloc[i]) + self.max_fall5_pct)
+                                     / self.max_fall5_pct, 0.0), 1.0)
+                t_vol = 1.0 - min(max(float(vol20.iloc[i]) / 0.05, 0.0), 1.0)
+                above_ma = float(price) / float(trend_ma.iloc[i]) - 1.0
+                t_trend = 1.0 - min(max(above_ma / 0.25, 0.0), 1.0)
+                t_rsi = 1.0 - min(abs(r - 5.5) / 3.5, 1.0)
+                t_gap = min(max(chase_pct / 0.02, -1.0), 1.0)
+                score = (0.35 * t_pullback + 0.15 * t_vol + 0.15 * t_trend
+                         + 0.10 * t_rsi + 0.25 * t_gap)
 
                 trades.append(Trade(
                     ticker=ticker,

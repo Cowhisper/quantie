@@ -46,3 +46,4 @@ ConnorsRSI2ReversionStrategy:
   rsi_floor: 2.0            # RSI(2) 下限：排除连续跌停的下跌飞刀（A 股实证约束）
   max_fall5_pct: 0.25       # 近 5 日累计跌幅上限：排除崩盘式下跌
   skip_st: true             # 排除 ST/*ST 个股（退市风险不符合均值回归前提）
+  skip_limit_down: true     # 排除信号日跌停/暴跌（超卖中继，非均值回归机会）
