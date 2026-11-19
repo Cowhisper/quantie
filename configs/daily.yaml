@@ -26,7 +26,7 @@ daily:
   # stocks:                     # 核心股票池（all=false 时生效），[代码, 名称, 行业]；缺省用 lib/download.py 内置默认池
   # ---- 预测参数（语义与 forecast.py 一致）----
   warmup: 120                   # 指标预热天数
-  strategies: [ross]            # 要预测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go）
+  strategies: [ross]            # 要预测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归）
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
     ross: [PriceRangeCondition]
   output_dir: forecast          # 预测 CSV 输出目录（push 模式从这里读最新结果）
@@ -52,3 +52,13 @@ RossCameronGapAndGoStrategy:
   trail_pct: 0.05
   breakout_exit_days: 1
   max_hold_days: 5
+
+# Connors RSI(2) 超卖均值回归（加入 strategies 列表时生效；warmup 需 ≥ trend_window）
+ConnorsRSI2ReversionStrategy:
+  rsi_window: 2
+  rsi_buy: 10.0
+  trend_window: 200
+  exit_ma_window: 5
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.10
+  max_hold_days: 10

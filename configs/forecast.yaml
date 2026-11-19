@@ -33,7 +33,7 @@ forecast:
     - [sh.601899, 紫金矿业, 有色]
     - [sz.300760, 迈瑞医疗, 医疗器械]
   warmup: 120                   # 指标预热天数（加载信号日前多少天数据计算指标）
-  strategies: [ross]            # 要预测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go）
+  strategies: [ross]            # 要预测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归）
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
     ross: [PriceRangeCondition]
   output_dir: forecast          # CSV 输出目录
@@ -59,3 +59,13 @@ RossCameronGapAndGoStrategy:
   stop_loss_pct: 0.05
   trail_pct: 0.05
   max_hold_days: 5
+
+# Connors RSI(2) 超卖均值回归（加入 strategies 列表时生效；warmup 需 ≥ trend_window）
+ConnorsRSI2ReversionStrategy:
+  rsi_window: 2
+  rsi_buy: 10.0
+  trend_window: 200
+  exit_ma_window: 5
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.10
+  max_hold_days: 10

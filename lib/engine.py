@@ -40,6 +40,7 @@ HOLDING_COLUMNS = [
 STRATEGY_REGISTRY: Dict[str, str] = {
     "ma": "MovingAverageCrossStrategy",
     "ross": "RossCameronGapAndGoStrategy",
+    "rsi2": "ConnorsRSI2ReversionStrategy",
 }
 
 CONDITION_NAMES = (

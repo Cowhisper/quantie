@@ -9,7 +9,7 @@ engine:
   end: "2026-11-15"             # 回测结束日期（必填）
   output: strategy_report.html  # serve=false 时生成的静态报告路径
   trades_xlsx: trades.xlsx      # 成交交易 Excel 路径（每策略一个 sheet，每笔交易一行；空=不导出）
-  warmup: 120                   # 指标预热天数
+  warmup: 250                   # 指标预热天数（rsi2 的 200 日均线需要 ≥250 才有值）
   serve: true                   # true=启动 Web 服务（Vue 交互报告）；false=只生成静态 HTML
   host: "127.0.0.1"
   port: 8000
@@ -17,10 +17,11 @@ engine:
   max_charts: 1000              # 每个策略嵌入 K 线图的交易数量上限（同一笔交易持仓期内共用一张图）
   initial_capital: 100000      # 账户初始资金（交易明细的总资产/现金/持仓金额从这笔资金起算）
   max_positions: 10            # 最大持仓股票数；资金与仓位按策略买入倾向评分优先配给高分信号，现金保证不为负
-  strategies: [ma, ross]        # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go）
+  strategies: [ma, ross, rsi2]    # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归）
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
     ma: [PriceRangeCondition]
     ross: [PriceRangeCondition]
+    rsi2: [PriceRangeCondition]
 
 # 各条件类的参数（条件用 yacrs @register 注册，段名 = 类名）
 # 示例给了一个接近"不限"的宽区间；当前库排序靠前的代码多为指数（价格数百至数千），
@@ -48,3 +49,14 @@ RossCameronGapAndGoStrategy:
   stop_loss_pct: 0.05
   trail_pct: 0.05
   max_hold_days: 5
+
+# Connors RSI(2) 超卖均值回归：长期均线上方的 RSI(2) 深度超卖，收盘站上 5 日线离场
+# （warmup 需 ≥ trend_window，见 engine.warmup）
+ConnorsRSI2ReversionStrategy:
+  rsi_window: 2
+  rsi_buy: 10.0
+  trend_window: 200
+  exit_ma_window: 5
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.10
+  max_hold_days: 10
