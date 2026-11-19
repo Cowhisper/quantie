@@ -22,6 +22,9 @@
 - 增加收盘止损 stop_loss_pct（默认 10%）与时间止损 max_hold_days
   （默认 10 天）：原文对象是指数 ETF，无退市风险；A 股个股可能连续
   阴跌不触发"站上 5 日线"，需要显式兜底（见 docs/strategy_connors_rsi2.md##卖出）
+- 增加 A 股个股实证买入约束（见 docs/strategy_connors_rsi2.md##买入）：
+  RSI(2) ≥ rsi_floor（默认 2，排除连续跌停的下跌飞刀）、近 5 日跌幅
+  不超过 max_fall5_pct（默认 25%，排除崩盘式下跌）、排除 ST/*ST
 """
 
 from typing import List, Optional, Tuple
@@ -63,6 +66,12 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
       的回调才均值回归；下跌趋势中的超卖多是基本面恶化，继续阴跌概率大）
     - RSI(rsi_window=2) < rsi_buy（默认 10，原文规则；RSI(2) 对单日
       极端波动极灵敏，<10 表示近 2 日几乎单边下跌）
+    - RSI(rsi_window) ≥ rsi_floor（默认 2；A 股实证：RSI(2)→0 多为连续
+      跌停/基本面恶化的下跌飞刀，继续阴跌概率大，越深超卖评分越高的
+      原文结论在 A 股个股上不成立，故设下限排除飞刀区）
+    - 近 5 日累计跌幅不超过 max_fall5_pct（默认 25%；崩盘式下跌的
+      超卖不是均值回归机会）
+    - 非 ST/*ST 个股（skip_st，退市风险不符合均值回归前提）
 
     入场：信号日次日以开盘价买入（买入量按固定本金仓位计算），
     次日高开超过 max_chase_pct（默认 5%）放弃——超卖反弹隔夜已兑现。
@@ -95,6 +104,8 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
                  trend_window: int = 200, exit_ma_window: int = 5,
                  max_chase_pct: float = 0.05, stop_loss_pct: float = 0.10,
                  max_hold_days: int = 10,
+                 rsi_floor: float = 2.0, max_fall5_pct: float = 0.25,
+                 skip_st: bool = True,
                  conditions: Optional[List[BaseCondition]] = None,
                  position: Optional[BasePosition] = None) -> None:
         super().__init__()
@@ -105,6 +116,9 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
         self.max_chase_pct = max_chase_pct
         self.stop_loss_pct = stop_loss_pct
         self.max_hold_days = max_hold_days
+        self.rsi_floor = rsi_floor
+        self.max_fall5_pct = max_fall5_pct
+        self.skip_st = skip_st
         self.conditions = list(conditions) if conditions else []
         self.position = position if position is not None else FixedCapitalPosition()
 
@@ -125,12 +139,20 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
         close = df["close"]
         trend_ma = close.rolling(self.trend_window).mean()
         rsi = _rsi(close, self.rsi_window)
+        ret5 = close.pct_change(5)
         filters: List[Tuple[str, pd.Series]] = [
             (f"收盘价高于 MA{self.trend_window}（长期上升趋势）",
              close > trend_ma),
             (f"RSI({self.rsi_window}) < {self.rsi_buy:g}（深度超卖）",
              rsi < self.rsi_buy),
+            (f"RSI({self.rsi_window}) ≥ {self.rsi_floor:g}（排除连续跌停的下跌飞刀）",
+             rsi >= self.rsi_floor),
+            (f"近5日累计跌幅不超过 {self.max_fall5_pct:.0%}（排除崩盘式下跌）",
+             ret5 >= -self.max_fall5_pct),
         ]
+        if self.skip_st:
+            not_st = ~df["name"].astype(str).str.contains("ST", na=False)
+            filters.append(("排除 ST/*ST 个股（退市风险，不符合均值回归前提）", not_st))
         for label, mask in filters:
             signal_dates &= set(df.loc[mask, "date"])
             stages.append((label, len(signal_dates)))

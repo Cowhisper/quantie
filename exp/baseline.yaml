@@ -43,3 +43,6 @@ ConnorsRSI2ReversionStrategy:
   max_chase_pct: 0.05       # 次日高开追价上限：反弹隔夜已兑现则放弃
   stop_loss_pct: 0.10       # 止损（A 股个股兜底；原文指数 ETF 不设止损）
   max_hold_days: 10         # 时间止损（原文持仓通常 2~7 天）
+  rsi_floor: 2.0            # RSI(2) 下限：排除连续跌停的下跌飞刀（A 股实证约束）
+  max_fall5_pct: 0.25       # 近 5 日累计跌幅上限：排除崩盘式下跌
+  skip_st: true             # 排除 ST/*ST 个股（退市风险不符合均值回归前提）
