@@ -17,8 +17,8 @@
 - 信号日收盘确认（RSI(2) 超卖 + 200 日均线上方），次日开盘买入；
   原版按信号日收盘价成交，此处改为次日开盘，避免"当日收盘算信号、
   当日收盘成交"的前视偏差（A 股 T+1 下买入当日也不可卖出）
-- 次日高开超过 max_chase_pct（默认 5%）放弃——超卖的隔夜反弹空间
-  已被兑现，追高则盈亏比恶化
+- 次日高开超过 max_chase_pct 放弃（默认 0.0，即不追任何高开；A 股实证
+  单调最优——隔夜高开说明反弹已被兑现，追高则盈亏比恶化）
 - 增加收盘止损 stop_loss_pct（默认 10%）与时间止损 max_hold_days
   （默认 10 天）：原文对象是指数 ETF，无退市风险；A 股个股可能连续
   阴跌不触发"站上 5 日线"，需要显式兜底（见 docs/strategy_connors_rsi2.md##卖出）
@@ -78,10 +78,12 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
       "超卖"多是持续下跌的中继）
 
     入场：信号日次日以开盘价买入（买入量按固定本金仓位计算），
-    次日高开超过 max_chase_pct（默认 5%）放弃——超卖反弹隔夜已兑现。
+    次日高开超过 max_chase_pct（默认 0.0，不追任何高开）放弃——
+    超卖反弹隔夜已兑现。
 
     出场（持仓次日起每日收盘依次检查，全仓卖出；A 股 T+1：买入当日不可卖出）：
-    - 收盘站上 exit_ma_window 日均线（默认 5 日）：反弹目标达到，离场
+    - 收盘站上 exit_ma_window 日均线（默认 3 日；A 股实证 exit=3 收益最优，
+      原文 5 日）：反弹目标达到，离场
     - 收盘跌破买入价 stop_loss_pct（默认 10%）：止损（A 股个股风控兜底）
     - 持仓满 max_hold_days 天（默认 10 天）：时间止损
     - 回测区间结束：强制平仓
@@ -93,22 +95,22 @@ class ConnorsRSI2ReversionStrategy(BaseStrategy):
     """
 
     name = "Connors RSI(2) 超卖回归"
-    description = ("上升趋势中 RSI(2) 深度超卖买入，收盘站上 5 日均线离场，"
+    description = ("上升趋势中 RSI(2) 深度超卖买入，收盘站上短期均线离场，"
                    "止损/时间止损兜底（Larry Connors 日线版）")
 
     BUY_REASONS = {
         "rsi2_oversold": "RSI(2) 超卖且处长期均线上方，次日开盘买入（Connors 均值回归）",
     }
     SELL_REASONS = {
-        "ma_exit": "收盘站上 5 日均线，反弹目标达到",
+        "ma_exit": "收盘站上短期均线，反弹目标达到",
         "stop_loss": "收盘跌破止损位，强制离场",
         "time_stop": "持仓超过时间上限，强制离场",
         "end_of_backtest": "回测区间结束，强制平仓",
     }
 
     def __init__(self, rsi_window: int = 2, rsi_buy: float = 6.0,
-                 trend_window: int = 200, exit_ma_window: int = 5,
-                 max_chase_pct: float = 0.05, stop_loss_pct: float = 0.10,
+                 trend_window: int = 200, exit_ma_window: int = 3,
+                 max_chase_pct: float = 0.0, stop_loss_pct: float = 0.10,
                  max_hold_days: int = 10,
                  rsi_floor: float = 2.0, max_fall5_pct: float = 0.25,
                  skip_st: bool = True, skip_limit_down: bool = True,
