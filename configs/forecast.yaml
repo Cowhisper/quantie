@@ -81,13 +81,13 @@ JLawMultipleEdgeStrategy:
   max_base_depth_pct: 0.30
   contraction_recent: 10
   contraction_prior: 20
-  contraction_shrink: 0.6
-  max_last_contraction_pct: 0.15
+  contraction_shrink: 0.75
+  max_last_contraction_pct: 0.22
   dryup_days: 5
   dryup_ref: 20
   volume_dry_ratio: 0.8
   entry_mode: both
-  breakout_vol_mult: 1.5
+  breakout_vol_mult: 2.0
   pullback_window: 10
   ma_zone: 20
   ma_zone_pct: 0.02
@@ -95,7 +95,7 @@ JLawMultipleEdgeStrategy:
   min_amount: 100000000
   skip_st: true
   max_chase_pct: 0.05
-  stop_loss_pct: 0.05
+  stop_loss_pct: 0.08
   stop_buffer_pct: 0.02
   take_profit_pct: 0.20
   exit_ma_window: 10

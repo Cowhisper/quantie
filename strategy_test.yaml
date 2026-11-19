@@ -75,13 +75,13 @@ JLawMultipleEdgeStrategy:
   max_base_depth_pct: 0.30
   contraction_recent: 10
   contraction_prior: 20
-  contraction_shrink: 0.6
-  max_last_contraction_pct: 0.15
+  contraction_shrink: 0.75
+  max_last_contraction_pct: 0.22
   dryup_days: 5
   dryup_ref: 20
   volume_dry_ratio: 0.8
   entry_mode: both           # breakout=放量突破 / pullback=缩量回踩均线带 / both
-  breakout_vol_mult: 1.5
+  breakout_vol_mult: 2.0
   pullback_window: 10
   ma_zone: 20
   ma_zone_pct: 0.02
@@ -89,7 +89,7 @@ JLawMultipleEdgeStrategy:
   min_amount: 100000000      # 20 日平均成交额 ≥ 1 亿元（流动性过滤）
   skip_st: true
   max_chase_pct: 0.05
-  stop_loss_pct: 0.05        # 止损风险上限（原文 3%~5%）
+  stop_loss_pct: 0.08        # 止损风险上限（原文3%~5%的A股放宽；baseline 5/8/10三点16.32/18.90/14.76，8%为峰）
   stop_buffer_pct: 0.02      # 止损放多重优势区下沿下方约 2%
   take_profit_pct: 0.20      # 趁强卖固定止盈（R:R 2~2.5 的日线近似）
   exit_ma_window: 10         # 趁弱卖：跌破 10 日均线带离场

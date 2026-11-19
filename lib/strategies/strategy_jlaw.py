@@ -25,7 +25,8 @@ J Law：香港前中学教师，2024 年美国投资锦标赛百万美元以上�
   区间末强制平仓；「趋势持有/零成本减仓」需人工判断股票类型，不在机械实现内
 - 原文按"单笔风险 0.35% 倒推股数"，本仓库统一用固定本金仓位（见文档##买入量）
 
-超参均为 A 股初版默认值（依据公开口径直接迁移），待 baseline 校准。
+超参经 exp/baseline.yaml 回测校准（2026-11-19，分支 autostrategy/Exp-jlaw-20261119-01，
+详见 docs/strategy_jlaw.md 末尾的 A 股实证校准记录）。
 """
 
 from typing import List, Optional, Tuple
@@ -72,7 +73,8 @@ class JLawMultipleEdgeStrategy(BaseStrategy):
 
     出场（持仓次日起每日收盘依次检查，全仓卖出；A 股 T+1：买入当日不可卖出）：
     - 收盘跌破止损价（信号日算出：max(买入价 × (1−stop_loss_pct)，多重优势区
-      下沿 × (1−stop_buffer_pct)) 取更近者，风险上限默认 5%，对应原文 3%~5%）
+      下沿 × (1−stop_buffer_pct)) 取更近者，风险上限默认 8%，对应原文 3%~5% 的
+      A 股放宽——baseline 实证 5%/8%/10% 三点 16.32%/18.90%/14.76%，8% 为峰）
     - 收盘 < MA exit_ma_window × (1 − exit_ma_buffer_pct)（趁弱卖，默认 10 日线）
     - 收盘 ≥ 买入价 × (1 + take_profit_pct)（趁强卖，默认 +20%）
     - 持仓满 max_hold_days 天（默认 60 个交易日，波段~中线）
@@ -105,16 +107,16 @@ class JLawMultipleEdgeStrategy(BaseStrategy):
                  rally_window: int = 120, min_rally_pct: float = 0.30,
                  base_window: int = 45, max_base_depth_pct: float = 0.30,
                  contraction_recent: int = 10, contraction_prior: int = 20,
-                 contraction_shrink: float = 0.6,
-                 max_last_contraction_pct: float = 0.15,
+                 contraction_shrink: float = 0.75,
+                 max_last_contraction_pct: float = 0.22,
                  dryup_days: int = 5, dryup_ref: int = 20,
                  volume_dry_ratio: float = 0.8,
                  entry_mode: str = "both",
-                 breakout_vol_mult: float = 1.5, pullback_window: int = 10,
+                 breakout_vol_mult: float = 2.0, pullback_window: int = 10,
                  ma_zone: int = 20, ma_zone_pct: float = 0.02,
                  pullback_vol_ratio: float = 0.8,
                  min_amount: float = 1e8, skip_st: bool = True,
-                 max_chase_pct: float = 0.05, stop_loss_pct: float = 0.05,
+                 max_chase_pct: float = 0.05, stop_loss_pct: float = 0.08,
                  stop_buffer_pct: float = 0.02, take_profit_pct: float = 0.20,
                  exit_ma_window: int = 10, exit_ma_buffer_pct: float = 0.01,
                  max_hold_days: int = 60,
