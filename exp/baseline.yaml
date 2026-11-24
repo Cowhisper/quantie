@@ -9,7 +9,7 @@ engine:
   end: "2026-11-15"             # 回测结束日期（必填）
   output: exp/strategy_report.html  # serve=false 时生成的静态报告路径
   trades_xlsx: exp/trades.xlsx      # 成交交易 Excel 路径（每策略一个 sheet，每笔交易一行；空=不导出）
-  warmup: 250                   # 指标预热天数（jlaw 的 MA200 + 250 日高点需要 ≥250）
+  warmup: 250                   # 指标预热天数（gianluca 箱体/均量窗口只需 ~60，与全库其他策略口径一致取 250）
   serve: false                  # true=启动 Web 服务（Vue 交互报告）；false=只生成静态 HTML
   host: "127.0.0.1"
   port: 8000
@@ -17,9 +17,9 @@ engine:
   max_charts: 1000              # 每个策略嵌入 K 线图的交易数量上限（同一笔交易持仓期内共用一张图）
   initial_capital: 100000       # 账户初始资金（交易明细的总资产/现金/持仓金额从这笔资金起算）
   max_positions: 10             # 最大持仓股票数；资金与仓位按策略买入倾向评分优先配给高分信号，现金保证不为负
-  strategies: [jlaw]            # 要回测的策略（jlaw=J Law VCP 多重优势）
+  strategies: [gianluca]        # 要回测的策略（gianluca=Gianluca 亚盘箱体突破）
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
-    jlaw: [PriceRangeCondition]
+    gianluca: [PriceRangeCondition]
 
 # 各条件类的参数（条件用 yacrs @register 注册，段名 = 类名）
 # 示例给了一个接近"不限"的宽区间；当前库排序靠前的代码多为指数（价格数百至数千），
@@ -33,36 +33,25 @@ FixedCapitalPosition:
   capital: 10000
   lot_size: 100
 
-# J Law 多重优势交易系统 / VCP 突破回踩（说明文档见 docs/strategy_jlaw.md）：
-# Stage 2 趋势（MA50>MA200 向上）+ 催化涨幅 + VCP 逐次收缩 + 末段缩量后，
-# 放量突破 Pivot 或首次缩量回踩 20 日均线带买入；跌破均线带趁弱卖 / 固定止盈趁强卖
-# 注意：该段即实验配置，优化时直接改这里的超参（对应 JLawMultipleEdgeStrategy 构造参数）
-JLawMultipleEdgeStrategy:
-  trend_fast: 50
-  trend_slow: 200
-  rally_window: 120
-  min_rally_pct: 0.30
-  base_window: 45
-  max_base_depth_pct: 0.30
-  contraction_recent: 10
-  contraction_prior: 20
-  contraction_shrink: 0.75
-  max_last_contraction_pct: 0.22
-  dryup_days: 5
-  dryup_ref: 20
-  volume_dry_ratio: 0.8
-  entry_mode: both
-  breakout_vol_mult: 2.0
-  pullback_window: 10
-  ma_zone: 20
-  ma_zone_pct: 0.02
-  pullback_vol_ratio: 0.8
-  min_amount: 100000000
-  skip_st: true
-  max_chase_pct: 0.05
-  stop_loss_pct: 0.08
-  stop_buffer_pct: 0.02
-  take_profit_pct: 0.20
-  exit_ma_window: 10
-  exit_ma_buffer_pct: 0.01
-  max_hold_days: 60
+# Gianluca Bruni 亚盘箱体突破（说明文档见 docs/strategy_gianluca.md）：
+# 过去 box_window 日窄幅横盘箱体（亚盘低波动收敛的日线代理）+ 收盘放量
+# 突破箱体上沿（accepted expansion）次日开盘买入；跌回箱体=突破失败离场，
+# 止损/移动止盈/度量目标止盈/时间止损兜底
+# 注意：该段即实验配置，优化时直接改这里的超参（对应 GianlucaAsianBoxStrategy 构造参数）
+GianlucaAsianBoxStrategy:
+  box_window: 20            # 箱体回看窗口（不含信号日）
+  max_box_width_pct: 0.15   # 箱体宽度上限（上沿/下沿−1）：低波动收敛才有突破价值
+  vol_window: 20            # 均量窗口（不含当日）
+  breakout_vol_mult: 1.5    # 突破日量 ≥ 均量 × 1.5：流动性涌入确认，无量突破多为假突破
+  min_close_pos: 0.5        # 收盘位于当日振幅上半部：accepted vs rejected 的区分
+  max_turn_pct: 15.0        # 信号日换手率上限(%)：高换手=拥挤交易，次日退潮
+  max_signal_pct: 9.0       # 信号日涨幅上限(%)：不追涨停延续，动能透支
+  skip_st: true             # 排除 ST/*ST（退市风险不符合突破前提）
+  skip_weekdays: []         # 不入场买入的星期几（0=周一…4=周五），默认不过滤
+  min_chase_pct: -0.03      # 次日开盘低开下限：低开超过则突破隔夜退潮、动能证伪
+  max_chase_pct: 0.05       # 次日开盘高开追价上限
+  stop_loss_pct: 0.08       # 止损（原文箱体中点/对侧止损的固定百分比近似）
+  trail_pct: 0.06           # 盈利后自最高价回撤止盈
+  take_profit_pct: 0.15     # 度量目标止盈（箱体高度投影 / 固定盈亏比 1:2 的日线近似）
+  breakout_exit_days: 2     # 突破失败退出仅检查持仓前 N 个交易日（跌回箱体=假突破）
+  max_hold_days: 10         # 时间止损（原文日内平仓纪律的日线代理）

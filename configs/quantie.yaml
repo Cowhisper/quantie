@@ -65,12 +65,13 @@ engine:
   max_charts: 1000              # 每个策略嵌入 K 线图的交易数量上限（同一笔交易持仓期内共用一张图）
   initial_capital: 100000       # 账户初始资金（交易明细的总资产/现金/持仓金额从这笔资金起算）
   max_positions: 10             # 最大持仓股票数；资金与仓位按策略买入倾向评分优先配给高分信号，现金保证不为负
-  strategies: [ma, ross, rsi2, jlaw]  # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归，jlaw=J Law VCP 多重优势）
+  strategies: [ma, ross, rsi2, jlaw, gianluca]  # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归，jlaw=J Law VCP 多重优势，gianluca=Gianluca 亚盘箱体突破）
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
     ma: [PriceRangeCondition]
     ross: [PriceRangeCondition]
     rsi2: [PriceRangeCondition]
     jlaw: [PriceRangeCondition]
+    gianluca: [PriceRangeCondition]
 
 # 明日买入预测参数（对应 quantie.py forecast 的 forecast 任务）
 forecast:
@@ -214,3 +215,26 @@ JLawMultipleEdgeStrategy:
   exit_ma_window: 10         # 趁弱卖：跌破 10 日均线带离场
   exit_ma_buffer_pct: 0.01
   max_hold_days: 60
+
+# Gianluca Bruni 亚盘箱体突破（说明文档 docs/strategy_gianluca.md）：
+# 过去 box_window 日窄幅横盘箱体（亚盘低波动收敛的日线代理）+ 收盘放量
+# 突破箱体上沿（accepted expansion）次日开盘买入；跌回箱体=突破失败离场，
+# 止损/移动止盈/度量目标止盈/时间止损兜底；skip_weekdays 为原文
+# 「按星期统计调整风险」的机械化（默认空，需自行回测标定后启用）
+GianlucaAsianBoxStrategy:
+  box_window: 20            # 箱体回看窗口（不含信号日）
+  max_box_width_pct: 0.15   # 箱体宽度上限（上沿/下沿−1）：低波动收敛才有突破价值
+  vol_window: 20            # 均量窗口（不含当日）
+  breakout_vol_mult: 1.5    # 突破日量 ≥ 均量 × 1.5：流动性涌入确认，无量突破多为假突破
+  min_close_pos: 0.5        # 收盘位于当日振幅上半部：accepted vs rejected 的区分
+  max_turn_pct: 15.0        # 信号日换手率上限(%)：高换手=拥挤交易，次日退潮
+  max_signal_pct: 9.0       # 信号日涨幅上限(%)：不追涨停延续，动能透支
+  skip_st: true             # 排除 ST/*ST（退市风险不符合突破前提）
+  skip_weekdays: []         # 不入场买入的星期几（0=周一…4=周五），默认不过滤
+  min_chase_pct: -0.03      # 次日开盘低开下限：低开超过则突破隔夜退潮、动能证伪
+  max_chase_pct: 0.05       # 次日开盘高开追价上限
+  stop_loss_pct: 0.08       # 止损（原文箱体中点/对侧止损的固定百分比近似）
+  trail_pct: 0.06           # 盈利后自最高价回撤止盈
+  take_profit_pct: 0.15     # 度量目标止盈（箱体高度投影 / 固定盈亏比 1:2 的日线近似）
+  breakout_exit_days: 2     # 突破失败退出仅检查持仓前 N 个交易日（跌回箱体=假突破）
+  max_hold_days: 10         # 时间止损（原文日内平仓纪律的日线代理）

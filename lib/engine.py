@@ -42,6 +42,7 @@ STRATEGY_REGISTRY: Dict[str, str] = {
     "ross": "RossCameronGapAndGoStrategy",
     "rsi2": "ConnorsRSI2ReversionStrategy",
     "jlaw": "JLawMultipleEdgeStrategy",
+    "gianluca": "GianlucaAsianBoxStrategy",
 }
 
 CONDITION_NAMES = (
