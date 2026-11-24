@@ -47,7 +47,7 @@ GianlucaAsianBoxStrategy:
   max_turn_pct: 15.0        # 信号日换手率上限(%)：高换手=拥挤交易，次日退潮
   max_signal_pct: 9.0       # 信号日涨幅上限(%)：不追涨停延续，动能透支
   skip_st: true             # 排除 ST/*ST（退市风险不符合突破前提）
-  skip_weekdays: []         # 不入场买入的星期几（0=周一…4=周五），默认不过滤
+  skip_weekdays: [1]        # 不入场买入的星期几（0=周一…4=周五）：baseline 信号日周二 180 笔均 -1.15% 胜率 27.2% 显著最差（=买入日周三，原文周三不利口径一致）
   min_chase_pct: -0.03      # 次日开盘低开下限：低开超过则突破隔夜退潮、动能证伪
   max_chase_pct: 0.05       # 次日开盘高开追价上限
   stop_loss_pct: 0.08       # 止损（原文箱体中点/对侧止损的固定百分比近似）
