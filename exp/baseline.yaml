@@ -44,7 +44,7 @@ GianlucaAsianBoxStrategy:
   vol_window: 20            # 均量窗口（不含当日）
   breakout_vol_mult: 1.5    # 突破日量 ≥ 均量 × 1.5：流动性涌入确认，无量突破多为假突破
   min_close_pos: 0.5        # 收盘位于当日振幅上半部：accepted vs rejected 的区分
-  max_turn_pct: 15.0        # 信号日换手率上限(%)：高换手=拥挤交易，次日退潮
+  max_turn_pct: 10.0        # 信号日换手率上限(%)：高换手=拥挤交易，次日退潮；probe4 收紧 15→10（信号特征分桶 turn(10,15] 107 笔均 -0.61% 胜率 29.9% 最差）
   max_signal_pct: 9.0       # 信号日涨幅上限(%)：不追涨停延续，动能透支
   skip_st: true             # 排除 ST/*ST（退市风险不符合突破前提）
   skip_weekdays: [1]        # 不入场买入的星期几（0=周一…4=周五）：baseline 信号日周二 180 笔均 -1.15% 胜率 27.2% 显著最差（=买入日周三，原文周三不利口径一致）
