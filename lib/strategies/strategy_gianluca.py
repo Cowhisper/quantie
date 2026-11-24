@@ -74,8 +74,9 @@ class GianlucaAsianBoxStrategy(BaseStrategy):
     - 收盘跌回箱体内部（< 信号日箱体上沿）：突破失败（rejected break），
       仅持仓前 breakout_exit_days 个交易日检查（默认 2，走远后参考线
       失效，交给止损/移动止盈/止盈）
-    - 曾盈利后自持仓期最高价回撤 trail_pct（默认 6%）：移动止盈
-      （动能衰减）
+    - 曾盈利（持仓期最高价 > 买入价 × (1 + trail_activate_pct)，默认 3%
+      启动门槛：峰值仅略高于买入价时回撤 6% 等于变相止损）后自最高价
+      回撤 trail_pct（默认 6%）：移动止盈（动能衰减）
     - 收盘 ≥ 买入价 × (1 + take_profit_pct)（默认 15%）：度量目标
       止盈（原文箱体高度投影 / 固定盈亏比 1:2 的日线近似）
     - 持仓满 max_hold_days 天（默认 10 个交易日）：时间止损（原文
@@ -111,6 +112,7 @@ class GianlucaAsianBoxStrategy(BaseStrategy):
                  skip_st: bool = True, skip_weekdays: Optional[List[int]] = None,
                  min_chase_pct: float = -0.03, max_chase_pct: float = 0.05,
                  stop_loss_pct: float = 0.08, trail_pct: float = 0.06,
+                 trail_activate_pct: float = 0.03,
                  take_profit_pct: float = 0.15, breakout_exit_days: int = 2,
                  max_hold_days: int = 10,
                  conditions: Optional[List[BaseCondition]] = None,
@@ -136,6 +138,7 @@ class GianlucaAsianBoxStrategy(BaseStrategy):
         self.max_chase_pct = float(max_chase_pct)
         self.stop_loss_pct = float(stop_loss_pct)
         self.trail_pct = float(trail_pct)
+        self.trail_activate_pct = float(trail_activate_pct)
         self.take_profit_pct = float(take_profit_pct)
         self.breakout_exit_days = int(breakout_exit_days)
         self.max_hold_days = int(max_hold_days)
@@ -298,7 +301,7 @@ class GianlucaAsianBoxStrategy(BaseStrategy):
                 elif (price < signal_box_high
                       and hold_days - 1 <= self.breakout_exit_days):
                     sell_reason = self.SELL_REASONS["failed_breakout"]
-                elif (peak_price > trade.buy_price
+                elif (peak_price > trade.buy_price * (1 + self.trail_activate_pct)
                         and price < peak_price * (1 - self.trail_pct)):
                     sell_reason = self.SELL_REASONS["trailing_stop"]
                 elif price >= trade.buy_price * (1 + self.take_profit_pct):

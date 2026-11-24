@@ -52,6 +52,7 @@ GianlucaAsianBoxStrategy:
   max_chase_pct: 0.05       # 次日开盘高开追价上限
   stop_loss_pct: 0.08       # 止损（原文箱体中点/对侧止损的固定百分比近似）
   trail_pct: 0.06           # 盈利后自最高价回撤止盈
+  trail_activate_pct: 0.03  # 移动止盈启动门槛：峰值 > 买入价×(1+3%) 才启用（峰值刚过买入价时回撤 6%=变相止损）
   take_profit_pct: 0.15     # 度量目标止盈（箱体高度投影 / 固定盈亏比 1:2 的日线近似）
   breakout_exit_days: 2     # 突破失败退出仅检查持仓前 N 个交易日（跌回箱体=假突破）
   max_hold_days: 10         # 时间止损（原文日内平仓纪律的日线代理）
