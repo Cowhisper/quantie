@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
-from yacrs import _C, cli, configurable, register
+from yacrs import _C, configurable
 
 import lib  # noqa: F401  import lib 即触发所有策略/条件的 yacrs 注册
 from lib.account import simulate_account
@@ -1043,67 +1043,3 @@ class Engine:
         return results
 
 
-# ----------------------------------------------------------------------
-# CLI（yacrs：-c 加载 yaml/json/toml 配置，key=value 命令行覆盖）
-# ----------------------------------------------------------------------
-
-@cli("engine")
-@register("engine")
-def main(db=DEFAULT_DB, start=None, end=None, output="strategy_report.html",
-         trades_xlsx="trades.xlsx",
-         warmup=120, limit=0, max_charts=1000,
-         initial_capital=DEFAULT_INITIAL_CAPITAL, max_positions=10,
-         strategies=None, conditions=None,
-         serve=False, host="127.0.0.1", port=8000) -> None:
-    """
-    回测入口。所有参数在配置文件中设置（见 strategy_test.yaml），
-    也可以用 key=value 在命令行覆盖：
-        python -m lib.engine -c strategy_test.yaml engine.start=2025-01-01
-    serve=true 时启动 Web 服务（Vue 前端）展示报告，否则生成静态 HTML。
-    两种模式都会把成交交易导出为 trades_xlsx：一个 Excel 工作簿，
-    每个策略一个 sheet，每笔交易一行（含买卖信息与持有收益；
-    空字符串表示不导出）。
-    initial_capital 为账户初始资金；max_positions 为最大持仓股票数，
-    资金与仓位按策略买入倾向评分（Trade.score）优先配给高分信号，
-    保证现金不为负（lib/account.py）。
-    """
-    if not start or not end:
-        raise SystemExit("请在配置文件中设置 engine.start / engine.end（回测起止日期 YYYY-MM-DD）")
-
-    # 命令行 key=value 覆盖进来的值是字符串，数值参数统一转换
-    warmup, limit, max_charts = int(warmup), int(limit), int(max_charts)
-    initial_capital = float(initial_capital)
-    max_positions = int(max_positions)
-    port = int(port)
-    if isinstance(serve, str):  # 命令行覆盖 "false"/"0" 等字符串时按布尔解析
-        serve = serve.lower() not in ("0", "false", "no", "")
-    if isinstance(strategies, str):  # 命令行覆盖单值时按一个策略处理
-        strategies = [strategies]
-    strategy_names = list(strategies) if strategies else ["ma"]
-
-    df = load_data(db, start, end, warmup_days=warmup, limit=limit)
-    if df.empty:
-        print("数据库中没有数据，请先运行 download_data.py")
-        return
-
-    engine = Engine(strategies=build_strategies(strategy_names, conditions),
-                    initial_capital=initial_capital, max_positions=max_positions)
-    results = engine.evaluate(df, start, end)
-
-    if trades_xlsx:
-        path = export_trades_xlsx(results, trades_xlsx)
-        print(f"交易明细已导出: {path}")
-
-    if serve:
-        from lib.server import serve as serve_report  # 延迟导入避免循环
-        serve_report(results, start, end, host, port,
-                     initial_capital=initial_capital)
-    elif output:
-        path = generate_report(results, output, max_charts=max_charts,
-                               start_time=start, end_time=end,
-                               initial_capital=initial_capital)
-        print(f"报告已生成: {path}")
-
-
-if __name__ == "__main__":
-    main()

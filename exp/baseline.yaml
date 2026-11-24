@@ -1,8 +1,8 @@
-# 用法: python -m lib.engine -c exp/baseline.yaml
+# 用法: python quantie.py backtest -c exp/baseline.yaml
 # 命令行覆盖任意配置项（数字建议显式声明类型，否则按字符串处理）:
-#   python -m lib.engine -c exp/baseline.yaml engine.limit=5 PriceRangeCondition.max_price:float=50
+#   python quantie.py backtest -c exp/baseline.yaml engine.limit=5 PriceRangeCondition.max_price:float=50
 
-# 回测引擎参数（对应 lib/engine.py 的 main）
+# 回测引擎参数（对应 quantie.py backtest 任务，读取本文件的 engine 段）
 engine:
   db: a_stock_daily.db          # 数据库路径
   start: "2025-01-01"           # 回测开始日期（必填）

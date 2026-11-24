@@ -1,4 +1,4 @@
-"""Baostock A股日频数据下载内核（download_data.py 与 forecast.py 共用）。
+"""Baostock A股日频数据下载内核（quantie.py 的 download / forecast / daily 任务共用）。
 
 - 国内源，不限流，完全免费，前复权
 - 增量更新：每只股票只下载数据库中最后日期之后的数据，已覆盖的自动跳过
@@ -204,7 +204,7 @@ def format_eta(seconds):
 
 
 # ----------------------------------------------------------------------
-# 增量下载主流程（download_data.main 与 forecast.py 共用）
+# 增量下载主流程（quantie.py 的 download / forecast / daily 任务共用）
 # ----------------------------------------------------------------------
 
 def run_download(db=DEFAULT_DB, start=DEFAULT_START, end=None,
@@ -214,7 +214,7 @@ def run_download(db=DEFAULT_DB, start=DEFAULT_START, end=None,
     增量下载主流程：登录 baostock，逐只下载股票池并写入 db（每只股票
     写完即提交）。返回 {"success", "skip", "fail", "rows"} 统计。
     all/full_refresh 等布尔参数请调用方自行归一（见 _as_bool）。
-    bs / pool 可由调用方传入复用（如 download_data.main 已登录并解析过
+    bs / pool 可由调用方传入复用（如 download 任务已登录并解析过
     股票池），否则本函数自行登录 baostock、自行解析股票池。
     """
     sleep = float(sleep)
