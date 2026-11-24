@@ -1,0 +1,216 @@
+# quantie 统一配置：所有任务段共存于本文件，任何命令都用它
+#   python quantie.py download   # 增量下载行情（段 download）
+#   python quantie.py backtest   # 策略回测 + 报告（段 engine）
+#   python quantie.py forecast   # 预测下一交易日买入清单（段 forecast）
+#   python quantie.py daily      # 每日任务：更新→预测→模拟账户→推送（段 daily）
+#   python quantie.py export     # 数据库导出 CSV（段 export）
+# 命令行覆盖任意配置项（数字建议显式声明类型，否则按字符串处理）:
+#   python quantie.py download download.end=2026-11-15 download.all=true
+#   python quantie.py backtest engine.limit=5 PriceRangeCondition.max_price:float=50
+#   python quantie.py forecast forecast.strategies=[ma,ross] forecast.date=2026-11-18
+#   python quantie.py daily daily.mode=push daily.push=false
+#
+# 定时执行（crontab -e 添加，每天凌晨 02:00 开始，日志写入 daily.log）:
+#   0 2 * * * cd /Users/kurt/Repo/quantie && /Users/kurt/miniconda3/bin/python quantie.py daily -c configs/quantie.yaml >> daily.log 2>&1
+# 说明: 凌晨 02:00 昨日行情已完整，故 daily.end 默认为昨天；若盘后手动补跑
+# 想纳入当日行情，用 daily.end=<当天> 或直接用 forecast（其下载 end 默认当天）。
+
+# ====================================================================
+# 任务段
+# ====================================================================
+
+# 数据下载参数（对应 quantie.py download 的 download 任务）
+download:
+  db: a_stock_daily.db      # 数据库路径
+  start: "2024-01-01"       # 下载起始日期（首次下载 / 全量刷新时生效）
+  end: null                 # 下载结束日期（null = 昨天）
+  all: false                # true=下载全 A 股；false=下载下方 stocks 股票池
+  full_refresh: false       # true=忽略已有数据，重新下载全部历史
+  dry_run: false            # true=只打印每只股票将下载的区间，不联网下载、不写入
+  sleep: 0                  # 每只股票下载后的间隔秒数（0=不等待；baostock 不限流）
+  stocks: &core_pool        # 核心股票池（all=false 时生效），[代码, 名称, 行业]；forecast/daily 段用 *core_pool 引用同一份
+    - [sh.600519, 贵州茅台, 白酒]
+    - [sz.002594, 比亚迪, 新能源]
+    - [sz.300750, 宁德时代, 电池]
+    - [sz.000858, 五粮液, 白酒]
+    - [sh.601318, 中国平安, 保险]
+    - [sh.600036, 招商银行, 银行]
+    - [sz.000333, 美的集团, 家电]
+    - [sh.600900, 长江电力, 电力]
+    - [sz.002415, 海康威视, 安防]
+    - [sh.601012, 隆基绿能, 光伏]
+    - [sh.600276, 恒瑞医药, 医药]
+    - [sz.000001, 平安银行, 银行]
+    - [sz.300059, 东方财富, 券商]
+    - [sh.601888, 中国中免, 免税]
+    - [sz.002230, 科大讯飞, AI]
+    - [sh.600030, 中信证券, 券商]
+    - [sz.000568, 泸州老窖, 白酒]
+    - [sz.002714, 牧原股份, 养殖]
+    - [sh.601899, 紫金矿业, 有色]
+    - [sz.300760, 迈瑞医疗, 医疗器械]
+
+# 回测引擎参数（对应 quantie.py backtest 的 backtest 任务）
+engine:
+  db: a_stock_daily.db          # 数据库路径
+  start: "2025-01-01"           # 回测开始日期（必填）
+  end: "2026-11-15"             # 回测结束日期（必填）
+  output: exp/strategy_report.html  # serve=false 时生成的静态报告路径
+  trades_xlsx: exp/trades.xlsx      # 成交交易 Excel 路径（每策略一个 sheet，每笔交易一行；空=不导出）
+  warmup: 250                   # 指标预热天数（rsi2/jlaw 的 200 日均线需要 ≥250 才有值）
+  serve: false                  # true=启动 Web 服务（Vue 交互报告）；false=只生成静态 HTML
+  host: "127.0.0.1"
+  port: 8000
+  limit: 0                      # 只回测前 N 只股票（0=全部；排序靠前的多为指数）
+  max_charts: 1000              # 每个策略嵌入 K 线图的交易数量上限（同一笔交易持仓期内共用一张图）
+  initial_capital: 100000       # 账户初始资金（交易明细的总资产/现金/持仓金额从这笔资金起算）
+  max_positions: 10             # 最大持仓股票数；资金与仓位按策略买入倾向评分优先配给高分信号，现金保证不为负
+  strategies: [ma, ross, rsi2, jlaw]  # 要回测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归，jlaw=J Law VCP 多重优势）
+  conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
+    ma: [PriceRangeCondition]
+    ross: [PriceRangeCondition]
+    rsi2: [PriceRangeCondition]
+    jlaw: [PriceRangeCondition]
+
+# 明日买入预测参数（对应 quantie.py forecast 的 forecast 任务）
+forecast:
+  db: a_stock_daily.db          # 数据库路径（下载与信号扫描共用）
+  download: true                # true=先执行增量行情下载（与 download 任务同一内核 lib/download.py）
+  start: "2024-01-01"           # 首次下载 / 全量刷新时的起始日期
+  end: null                     # 下载结束日期（null=今天；盘后运行可取到当日行情）
+  all: true                     # true=下载全 A 股；false=下载下方 stocks 股票池
+  full_refresh: false           # true=忽略已有数据，重新下载全部历史
+  sleep: 0                      # 每只股票下载后的间隔秒数（baostock 不限流）
+  stocks: *core_pool            # all=false 时下载的股票池（引用 download 段的同一份）
+  warmup: 120                   # 指标预热天数（加载信号日前多少天数据计算指标）
+  strategies: [ross]            # 要预测的策略（ma=均线金叉，ross=Ross Cameron Gap&Go，rsi2=Connors RSI(2) 超卖回归，jlaw=J Law VCP 多重优势）
+  conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
+    ross: [PriceRangeCondition]
+  output_dir: forecast          # CSV 输出目录
+  date: null                    # 预测买入日 YYYY-MM-DD（null=明天）；CSV 命名为 {买入日}-{策略短名}.csv
+  max_positions: 10             # 每只策略最多输出的股票数（按评分降序取前 N，0=不限）
+  # ---- 本地模拟账户（同步信息时附上持仓明细与账户概览）----
+  paper: true                   # true=扫描后同步模拟账户并打印持仓/账户信息
+  paper_db: paper_account.db    # 模拟账户数据库路径（*.db 已被 .gitignore）
+  paper_capital: 100000         # 模拟账户本金
+  paper_max_positions: 10       # 模拟账户最大持仓股票数（买入按评分降序配给资金/仓位）
+
+# 每日任务参数（对应 quantie.py daily 的 daily 任务，TASKS.md 流程）
+daily:
+  mode: full                    # full=数据更新→预测→推送（定时）；push=只推送最新预测结果（手动触发）
+  push: true                    # full 模式跑完后是否推送
+  webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=8c9ca1ca-3f20-489c-969b-e60bfdf239cf"  # 企业微信机器人（TASKS.md）
+  max_retries: 5                # 下载失败重试轮数上限（TASKS.md：重试至全部成功；0=不限）
+  retry_sleep: 30               # 重试间隔秒数
+  # ---- 增量下载参数（语义与 download 任务一致）----
+  db: a_stock_daily.db          # 数据库路径（下载与信号扫描共用）
+  start: "2024-01-01"           # 首次下载 / 全量刷新时的起始日期
+  end: null                     # 下载结束日期（null=昨天；凌晨跑昨日数据已完整）
+  all: true                     # true=下载全 A 股；false=下载下方 stocks 股票池
+  full_refresh: false           # true=忽略已有数据，重新下载全部历史
+  sleep: 0                      # 每只股票下载后的间隔秒数（baostock 不限流）
+  stocks: *core_pool            # all=false 时下载的股票池（引用 download 段的同一份）
+  # ---- 预测参数（语义与 forecast 任务一致）----
+  warmup: 120                   # 指标预热天数
+  strategies: [ross]            # 要预测的策略
+  conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
+    ross: [PriceRangeCondition]
+  output_dir: forecast          # 预测 CSV 输出目录（push 模式从这里读最新结果）
+  date: null                    # 预测买入日 YYYY-MM-DD（null=明天）
+  max_positions: 10             # 每只策略最多输出的股票数（按评分降序取前 N，0=不限）
+  # ---- 本地模拟账户（同步持仓与成交记录，推送消息附上持仓明细/账户概览）----
+  paper: true                   # true=扫描后同步模拟账户（执行昨日挂单、检查持仓卖出、按日盯市）
+  paper_db: paper_account.db    # 模拟账户数据库路径（*.db 已被 .gitignore）
+  paper_capital: 100000         # 模拟账户本金
+  paper_max_positions: 10       # 模拟账户最大持仓股票数（买入按评分降序配给资金/仓位）
+
+# 数据导出参数（对应 quantie.py export 的 export 任务）
+export:
+  db: a_stock_daily.db          # 数据库路径
+  output_dir: csv_export        # 导出目录
+  mode: all                     # all=全量合并 / by_stock=按股票拆分 / by_sector=按板块拆分 / meta=元信息 / summary=统计摘要 / everything=全部
+
+# ====================================================================
+# 策略 / 条件 / 仓位参数段（yacrs @register 注册，段名 = 类名；
+# 回测、预测、每日任务共用，取值以统计标定版为准）
+# ====================================================================
+
+# 各条件类的参数（条件用 yacrs @register 注册，段名 = 类名）
+# 示例给了一个接近"不限"的宽区间；当前库排序靠前的代码多为指数（价格数百至数千），
+# 收窄区间（如 10~50）会把它们全部过滤掉
+PriceRangeCondition:
+  min_price: 1
+  max_price: 10000
+
+# 仓位管理（lib/position.py）：每笔固定本金，股数向下取整到整手，不足一手放弃
+FixedCapitalPosition:
+  capital: 10000
+  lot_size: 100
+
+MovingAverageCrossStrategy:
+  fast_window: 5
+  slow_window: 20
+  stop_loss_pct: 0.08
+
+# Ross Cameron Gap&Go（说明文档 docs/strategy_ross_cameron.md）：
+# 信号日换手率/涨幅/收盘位置过滤为统计标定参数（高换手=拥挤交易、
+# 涨停延续=动能透支、收低位=全天抛压，均显著提高次日失败概率）
+RossCameronGapAndGoStrategy:
+  gap_min_pct: 0.04
+  rel_vol_min: 2.0
+  vol_window: 20
+  max_turn_pct: 15.0        # 信号日换手率上限(%)：高换手=拥挤交易，次日退潮
+  max_signal_pct: 9.0       # 信号日涨幅上限(%)：不追涨停延续，动能透支
+  min_close_pos: 0.2        # 信号日收盘位于当日振幅的位置下限：收低位=全天抛压
+  min_chase_pct: -0.03      # 次日开盘相对信号日收盘低开下限：低开超过则动能证伪
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.10
+  trail_pct: 0.05
+  breakout_exit_days: 1     # 突破失败退出仅检查持仓前 N 个交易日（信号日低点参考线）
+  max_hold_days: 5
+
+# Connors RSI(2) 超卖均值回归（说明文档 docs/strategy_connors_rsi2.md）：
+# 长期上升趋势中 RSI(2) 深度超卖买入，收盘站上短期均线离场
+# （warmup 需 ≥ trend_window）
+ConnorsRSI2ReversionStrategy:
+  rsi_window: 2             # RSI 周期（"RSI(2)" 名称来源；对单日极端波动最灵敏）
+  rsi_buy: 10.0             # 超卖阈值（原文规则：RSI(2)<10；RSI(2) 越低预期收益越高）
+  trend_window: 200         # 长期趋势均线窗口（原文规则：只做上升趋势中的回调）
+  exit_ma_window: 5         # 离场参考均线（原文规则：收盘站上 5 日线即反弹到位）
+  max_chase_pct: 0.05       # 次日高开追价上限：反弹隔夜已兑现则放弃
+  stop_loss_pct: 0.10       # 止损（A 股个股兜底；原文指数 ETF 不设止损）
+  max_hold_days: 10         # 时间止损（原文持仓通常 2~7 天）
+
+# J Law 多重优势交易系统 / VCP 突破回踩（说明文档 docs/strategy_jlaw.md）：
+# Stage 2 趋势（MA50>MA200 向上）+ 催化涨幅 + VCP 逐次收缩 + 末段缩量后，
+# 放量突破 Pivot 或首次缩量回踩 20 日均线带买入；跌破均线带趁弱卖 / 固定止盈趁强卖
+# （warmup 需 ≥ 250：MA200 与 250 日高点需要约一年历史数据）
+JLawMultipleEdgeStrategy:
+  trend_fast: 50
+  trend_slow: 200
+  rally_window: 120
+  min_rally_pct: 0.30
+  base_window: 45
+  max_base_depth_pct: 0.30
+  contraction_recent: 10
+  contraction_prior: 20
+  contraction_shrink: 0.75
+  max_last_contraction_pct: 0.22
+  dryup_days: 5
+  dryup_ref: 20
+  volume_dry_ratio: 0.8
+  entry_mode: both           # breakout=放量突破 / pullback=缩量回踩均线带 / both
+  breakout_vol_mult: 2.0
+  pullback_window: 10
+  ma_zone: 20
+  ma_zone_pct: 0.02
+  pullback_vol_ratio: 0.8
+  min_amount: 100000000      # 20 日平均成交额 ≥ 1 亿元（流动性过滤）
+  skip_st: true
+  max_chase_pct: 0.05
+  stop_loss_pct: 0.08        # 止损风险上限（原文3%~5%的A股放宽；baseline 5/8/10三点16.32/18.90/14.76，8%为峰）
+  stop_buffer_pct: 0.02      # 止损放多重优势区下沿下方约 2%
+  take_profit_pct: 0.20      # 趁强卖固定止盈（R:R 2~2.5 的日线近似）
+  exit_ma_window: 10         # 趁弱卖：跌破 10 日均线带离场
+  exit_ma_buffer_pct: 0.01
+  max_hold_days: 60
