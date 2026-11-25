@@ -21,8 +21,8 @@ key=value 可覆盖任意配置项，数字建议显式声明类型（key:float=
       python quantie.py daily daily.mode=push
       python quantie.py export export.mode=by_stock
 
-定时任务（crontab 每天 02:00）:
-      0 2 * * * cd /Users/kurt/Repo/quantie && /Users/kurt/miniconda3/bin/python quantie.py daily -c configs/quantie.yaml >> daily.log 2>&1
+定时任务（crontab 每天闭市后 20:00）:
+      0 20 * * * cd /Users/kurt/Repo/quantie && /Users/kurt/miniconda3/bin/python quantie.py daily -c configs/quantie.yaml >> daily.log 2>&1
 """
 
 import argparse

@@ -162,7 +162,8 @@ def forecast_task(db=DEFAULT_DB, download=True, start=DEFAULT_START, end=None,
     download 一致；end 默认为今天，盘后运行可取到当日行情）；warmup 为
     指标预热天数；strategies 为要预测的策略短名（ma/ross/rsi2/jlaw）；
     conditions 为每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）；
-    output_dir 为 CSV 输出目录；date 为预测买入日（默认明天），即 CSV
+    output_dir 为 CSV 输出目录；date 为预测买入日（默认信号日的下一个
+    交易日，经 baostock 交易日历计算），即 CSV
     文件名 {date}-{策略}.csv 中的日期；max_positions 为每只策略最多输出
     的股票数（按评分降序取前 N，0 = 不限）；paper* 为本地模拟账户参数
     （扫描后同步：执行昨日挂单、检查持仓卖出、按日盯市并打印持仓明细与
@@ -292,13 +293,13 @@ def daily_task(mode="full", push=True, webhook=DEFAULT_WEBHOOK, max_retries=5,
     （失败重试）→ 预测 → 模拟账户同步 → 推送；mode=push：只推送最新已生成
     的预测结果（手动触发，附模拟账户当前状态）。db/start/end/all/
     full_refresh/sleep/stocks 为增量下载参数（语义与 download 一致；
-    end 默认昨天——凌晨运行时昨日数据已完整，盘后手动跑可用 end=<当天>
-    或 forecast 取到当日行情）；warmup/strategies/conditions/output_dir/
-    date/max_positions 为预测参数（语义与 forecast 一致）；paper* 为本地
-    模拟账户参数（本金默认 10 万，同步持仓/成交记录，推送消息附上持仓
-    明细与账户概览；paper=false 可关闭）；push=跑完后是否推送；
-    webhook=企业微信机器人地址；max_retries/retry_sleep=下载失败重试
-    次数与间隔秒数（0=不限次数重试）。"""
+    end 默认今天——闭市后（如 20:00）跑可取到当日行情，信号日 = 今天；
+    凌晨盘前跑当日尚无数据，自动落在昨天）；warmup/strategies/conditions/
+    output_dir/date/max_positions 为预测参数（语义与 forecast 一致）；
+    paper* 为本地模拟账户参数（本金默认 10 万，同步持仓/成交记录，推送
+    消息附上持仓明细与账户概览；paper=false 可关闭）；push=跑完后是否
+    推送；webhook=企业微信机器人地址；max_retries/retry_sleep=下载失败
+    重试次数与间隔秒数（0=不限次数重试）。"""
     mode = str(mode).lower()
     if mode not in ("full", "push"):
         raise SystemExit(f"daily.mode 只能是 full 或 push，got {mode}")
@@ -325,7 +326,7 @@ def daily_task(mode="full", push=True, webhook=DEFAULT_WEBHOOK, max_retries=5,
             print(f"    （账户库 {paper_db} 暂无记录，本次消息不含账户信息）")
     else:
         # 第 1 步：增量更新行情数据，失败重试至全部成功（TASKS.md 要求）
-        end = end or (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        end = end or datetime.now().strftime(DATE_FMT)
         attempt = 0
         while True:
             attempt += 1

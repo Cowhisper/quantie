@@ -4,9 +4,13 @@
 - 增量更新：每只股票只下载数据库中最后日期之后的数据，已覆盖的自动跳过
 - 每只股票一次请求覆盖全部缺失区间（不做日期分块），请求数 = 股票数
 - 每只股票写入后立即提交，中途断掉不丢已完成的部分（天然断点续传）
+- 板块/行业：全 A 股股票池的行业取自 baostock 证监会行业分类
+  （query_stock_industry，每周更新）；配置股票池用配置里的行业。
+  每次下载会把行业信息同步进 stock_meta / stock_daily（含历史行）
 """
 
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -127,6 +131,26 @@ def log_success(conn, code, action):
     """, (code, action))
 
 
+def sync_sectors(conn, pool):
+    """把股票池的行业信息同步进库：stock_meta / stock_daily 的 sector 更新为
+    当前分类（历史行一并刷新，保持同一股票全库口径一致；save_stock 只覆盖
+    本次下载区间的行，没有这一步旧的 "-" 会一直留在历史数据里）。
+    行业为 "-"（未获取到）的股票不动。返回更新了多少只股票。"""
+    known = {code: sector for code, _, sector in pool
+             if sector and sector != "-"}
+    if not known:
+        return 0
+    current = dict(conn.execute("SELECT ticker, sector FROM stock_meta"))
+    changed = [(code, sector) for code, sector in known.items()
+               if code in current and current[code] != sector]
+    for code, sector in changed:
+        conn.execute("UPDATE stock_meta SET sector = ? WHERE ticker = ?",
+                     (sector, code))
+        conn.execute("UPDATE stock_daily SET sector = ? "
+                     "WHERE ticker = ? AND sector != ?", (sector, code, sector))
+    return len(changed)
+
+
 # ----------------------------------------------------------------------
 # 下载
 # ----------------------------------------------------------------------
@@ -146,8 +170,30 @@ def fetch_stock(bs, code, start_date, end_date):
     return pd.DataFrame(rows, columns=rs.fields)
 
 
+def get_industry_map(bs, date):
+    """全 A 股行业分类（baostock query_stock_industry，证监会行业分类，
+    每周更新），返回 {code: 行业名称}（已剥离 "J66"/"C36" 这类分类代码
+    前缀）。查询失败返回 {}——行业信息是附加数据，不阻断行情下载。"""
+    try:
+        rs = bs.query_stock_industry(date=date)
+        if rs.error_code != "0":
+            return {}
+        i_code, i_ind = rs.fields.index("code"), rs.fields.index("industry")
+        result = {}
+        while rs.next():
+            row = rs.get_row_data()
+            industry = re.sub(r"^[A-Z]\d+", "", row[i_ind]).strip()
+            if industry:
+                result[row[i_code]] = industry
+        return result
+    except Exception:
+        return {}
+
+
 def get_stock_list(bs, end_date):
-    """全 A 股代码表（取 end_date 当天及之前最近一个有数据的交易日）。"""
+    """全 A 股代码表（取 end_date 当天及之前最近一个有数据的交易日），
+    行业取自 baostock 证监会行业分类，未收录的股票为 "-"。"""
+    industry = get_industry_map(bs, end_date)
     day = datetime.strptime(end_date, "%Y-%m-%d")
     for _ in range(10):  # 向前回退直到命中交易日
         rs = bs.query_all_stock(day=day.strftime("%Y-%m-%d"))
@@ -156,7 +202,8 @@ def get_stock_list(bs, end_date):
             row = rs.get_row_data()
             code = row[rs.fields.index("code")]
             if code.startswith("sh.") or code.startswith("sz."):
-                stocks.append((code, row[rs.fields.index("code_name")], "-"))
+                stocks.append((code, row[rs.fields.index("code_name")],
+                               industry.get(code, "-")))
         if stocks:
             return stocks
         day -= timedelta(days=1)
@@ -237,6 +284,12 @@ def run_download(db=DEFAULT_DB, start=DEFAULT_START, end=None,
     conn = init_db(db)
     status = get_stock_status(conn)
 
+    n_sector = sync_sectors(conn, pool)
+    if n_sector:
+        conn.commit()
+        print(f"行业分类同步: {n_sector} 只股票的板块信息已更新")
+        print()
+
     success_count = skip_count = fail_count = total_rows = 0
     t_start = time.time()
 
@@ -287,3 +340,32 @@ def last_trade_date(db_path) -> str | None:
     row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
     conn.close()
     return row[0] if row else None
+
+
+def next_trade_date(date_str, bs=None) -> str | None:
+    """date_str 之后的第一个交易日（baostock 交易日历，含节假日），
+    查询失败（未安装/未联网/登录失败）返回 None，由调用方决定兜底。
+    bs 可传入已登录的 baostock 模块复用连接，否则自行登录并登出。"""
+    try:
+        own_login = bs is None
+        if own_login:
+            import baostock as bs
+            lg = bs.login()
+            if lg.error_code != "0":
+                return None
+        try:
+            end = (datetime.strptime(date_str, DATE_FMT)
+                   + timedelta(days=15)).strftime(DATE_FMT)
+            rs = bs.query_trade_dates(start_date=date_str, end_date=end)
+            if rs.error_code != "0":
+                return None
+            while rs.next():
+                day, is_trading = rs.get_row_data()[:2]
+                if day > date_str and is_trading == "1":
+                    return day
+            return None
+        finally:
+            if own_login:
+                bs.logout()
+    except Exception:
+        return None

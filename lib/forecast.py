@@ -12,7 +12,7 @@ from typing import Dict, List
 import pandas as pd
 
 from lib.engine import build_strategies, load_data
-from lib.download import last_trade_date
+from lib.download import last_trade_date, next_trade_date
 from lib.strategies.base import BaseStrategy
 from lib.trade import Trade
 
@@ -134,9 +134,25 @@ def run_scan(db, warmup=120, strategies=None, conditions=None,
     if not signal_date:
         raise SystemExit("数据库中没有数据，请先运行数据下载（quantie.py download）"
                          "或先执行数据更新")
-    entry_date = date or (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    if date:
+        entry_date = date
+    else:
+        # 买入日 = 信号日的下一个交易日（与策略 run() 的入场逻辑一致：
+        # 凌晨盘前跑 -> 今天开盘买；盘后跑且数据最新 -> 明天）。
+        # 交易日历不可用时退回「运行日 +1 天」的近似
+        entry_date = next_trade_date(signal_date)
+        if entry_date is None:
+            entry_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            print(f"    [警告] 交易日历查询失败，买入日退回运行日+1天 = {entry_date}")
     if entry_date <= signal_date:
         raise SystemExit(f"买入日（{entry_date}）必须晚于库中最新交易日 {signal_date}")
+    # 数据陈旧检查：买入日已过去（含今天已收盘）说明库中缺最近交易日的行情，
+    # 此时产出的挂单在模拟账户入场校验时对不上策略买点，应先更新数据再预测
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    if entry_date < today or (entry_date == today and now.hour >= 15):
+        print(f"    [警告] 买入日 {entry_date} 早于当前时间（库中最新行情仅到 "
+              f"{signal_date}），数据可能不是最新，建议先更新数据再重新预测")
 
     df = load_data(db, signal_date, signal_date, warmup_days=int(warmup))
     if df.empty:

@@ -3,7 +3,7 @@
 你需要按照这个流程执行每日任务
 
 1. 数据更新
-   - 每天凌晨 2:00 开始
+   - 每天闭市后 20:00 开始
    - 使用`quantie.py download`拉取所有增量的行情数据，对于历史上已拉取过的数据跳过，只拉取最新数据。如果出现下载失败，则重试至所有股票都成功更新
 
 2. 预测和结果推送
@@ -32,13 +32,13 @@ xxx\tsh.xxxxx\t买入
 # 执行方式（已实现脚本，统一入口 quantie.py，配置 configs/quantie.yaml）
 
 1. 完整流程（数据更新 → 预测 → 推送）：`python quantie.py daily`
-   - 定时（crontab，每天凌晨 02:00）：
+   - 定时（crontab，每天闭市后 20:00）：
      ```
-     0 2 * * * cd /Users/kurt/Repo/quantie && /Users/kurt/miniconda3/bin/python quantie.py daily -c configs/quantie.yaml >> daily.log 2>&1
+     0 20 * * * cd /Users/kurt/Repo/quantie && /Users/kurt/miniconda3/bin/python quantie.py daily -c configs/quantie.yaml >> daily.log 2>&1
      ```
-     凌晨 02:00 昨日行情已完整，`daily.end` 默认为昨天；下载失败自动重试（`daily.max_retries` 轮，TASKS.md 要求重试至全部成功）。
+     闭市后 20:00 当日行情已完整，`daily.end` 默认为今天（信号日 = 今天，买入日 = 下一交易日）；下载失败自动重试（`daily.max_retries` 轮，TASKS.md 要求重试至全部成功）。
    - 手动跑完整流程：`python quantie.py daily`
-     （跑完自动推送；`daily.push=false` 可只跑不推；盘后补跑纳入当日行情用 `daily.end=<当天>`）
+     （跑完自动推送；`daily.push=false` 可只跑不推；凌晨盘前跑当日尚无数据，`daily.end` 自动落在昨天）
 
 2. 手动触发推送（不更新数据、不重新预测，重发最新预测结果）：
    - `python quantie.py daily daily.mode=push`

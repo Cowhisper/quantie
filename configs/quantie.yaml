@@ -10,10 +10,10 @@
 #   python quantie.py forecast forecast.strategies=[ma,ross] forecast.date=2026-11-18
 #   python quantie.py daily daily.mode=push daily.push=false
 #
-# 定时执行（crontab -e 添加，每天凌晨 02:00 开始，日志写入 daily.log）:
-#   0 2 * * * cd /Users/kurt/Repo/quantie && /Users/kurt/miniconda3/bin/python quantie.py daily -c configs/quantie.yaml >> daily.log 2>&1
-# 说明: 凌晨 02:00 昨日行情已完整，故 daily.end 默认为昨天；若盘后手动补跑
-# 想纳入当日行情，用 daily.end=<当天> 或直接用 forecast（其下载 end 默认当天）。
+# 定时执行（crontab -e 添加，每天闭市后 20:00 开始，日志写入 daily.log）:
+#   0 20 * * * cd /Users/kurt/Repo/quantie && /Users/kurt/miniconda3/bin/python quantie.py daily -c configs/quantie.yaml >> daily.log 2>&1
+# 说明: 闭市后 20:00 当日行情已完整，daily.end 默认为今天，信号日 = 今天、
+# 买入日 = 下一交易日；凌晨盘前跑当日尚无数据，下载自动落在昨天，口径不变。
 
 # ====================================================================
 # 任务段
@@ -22,7 +22,7 @@
 # 数据下载参数（对应 quantie.py download 的 download 任务）
 download:
   db: a_stock_daily.db      # 数据库路径
-  start: "2024-01-01"       # 下载起始日期（首次下载 / 全量刷新时生效）
+  start: "2022-01-01"       # 下载起始日期（首次下载 / 全量刷新时生效）
   end: null                 # 下载结束日期（null = 昨天）
   all: false                # true=下载全 A 股；false=下载下方 stocks 股票池
   full_refresh: false       # true=忽略已有数据，重新下载全部历史
@@ -54,7 +54,7 @@ download:
 engine:
   db: a_stock_daily.db          # 数据库路径
   start: "2025-01-01"           # 回测开始日期（必填）
-  end: "2026-11-15"             # 回测结束日期（必填）
+  end: "2026-11-25"             # 回测结束日期（必填）
   output: exp/strategy_report.html  # serve=false 时生成的静态报告路径
   trades_xlsx: exp/trades.xlsx      # 成交交易 Excel 路径（每策略一个 sheet，每笔交易一行；空=不导出）
   warmup: 250                   # 指标预热天数（rsi2/jlaw 的 200 日均线需要 ≥250 才有值）
@@ -88,7 +88,7 @@ forecast:
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
     ross: [PriceRangeCondition]
   output_dir: forecast          # CSV 输出目录
-  date: null                    # 预测买入日 YYYY-MM-DD（null=明天）；CSV 命名为 {买入日}-{策略短名}.csv
+  date: null                    # 预测买入日 YYYY-MM-DD（null=信号日的下一个交易日，按交易日历计算）；CSV 命名为 {买入日}-{策略短名}.csv
   max_positions: 10             # 每只策略最多输出的股票数（按评分降序取前 N，0=不限）
   # ---- 本地模拟账户（同步信息时附上持仓明细与账户概览）----
   paper: true                   # true=扫描后同步模拟账户并打印持仓/账户信息
@@ -106,7 +106,7 @@ daily:
   # ---- 增量下载参数（语义与 download 任务一致）----
   db: a_stock_daily.db          # 数据库路径（下载与信号扫描共用）
   start: "2024-01-01"           # 首次下载 / 全量刷新时的起始日期
-  end: null                     # 下载结束日期（null=昨天；凌晨跑昨日数据已完整）
+  end: null                     # 下载结束日期（null=今天；闭市后跑可取到当日行情，凌晨跑自动落在昨天）
   all: true                     # true=下载全 A 股；false=下载下方 stocks 股票池
   full_refresh: false           # true=忽略已有数据，重新下载全部历史
   sleep: 0                      # 每只股票下载后的间隔秒数（baostock 不限流）
@@ -117,7 +117,7 @@ daily:
   conditions:                   # 每个策略附加的市场过滤条件（类名 -> 自动绑定同名配置段）
     ross: [PriceRangeCondition]
   output_dir: forecast          # 预测 CSV 输出目录（push 模式从这里读最新结果）
-  date: null                    # 预测买入日 YYYY-MM-DD（null=明天）
+  date: null                    # 预测买入日 YYYY-MM-DD（null=信号日的下一个交易日）
   max_positions: 10             # 每只策略最多输出的股票数（按评分降序取前 N，0=不限）
   # ---- 本地模拟账户（同步持仓与成交记录，推送消息附上持仓明细/账户概览）----
   paper: true                   # true=扫描后同步模拟账户（执行昨日挂单、检查持仓卖出、按日盯市）
