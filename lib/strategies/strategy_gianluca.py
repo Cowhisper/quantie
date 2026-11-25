@@ -55,15 +55,19 @@ class GianlucaAsianBoxStrategy(BaseStrategy):
     - 接受：收盘位于当日振幅上半部（(close−low)/(high−low) ≥
       min_close_pos，默认 0.5）——收在下半部 = rejected break 的
       抛压特征；一字零振幅不产生信号
-    - 质量过滤（仓库实证沿用）：换手率 ≤ max_turn_pct（默认 15%，
-      高换手=拥挤交易）、涨幅 ≤ max_signal_pct（默认 9%，不追涨停
-      延续的动能透支）
+    - 质量过滤（仓库实证沿用）：换手率 ≤ max_turn_pct（默认 10%，
+      高换手=拥挤交易；A 股校准 15→10：turn(10,15] 分桶均 -0.61%
+      胜率 29.9% 全场最差）、涨幅 ≤ max_signal_pct（默认 9%，不追
+      涨停延续的动能透支）
     - 非 ST/*ST（skip_st）；信号日星期几不在 skip_weekdays 内
-      （默认空，原文按星期统计调整风险的机械化）
+      （默认 [1] 信号日周二不入场——A 股校准：周二信号 180 笔
+      均 -1.15% 胜率 27.2% 显著最差，=买入日周三，与原文周三不利
+      口径一致；原文按星期统计调整风险的机械化）
     - conditions 中附加的市场过滤条件（如 PriceRangeCondition）
 
     入场：信号日次日以开盘价买入（买入量按固定本金仓位计算），
-    次日相对信号日收盘高开超过 max_chase_pct（默认 5%）放弃（不追高），
+    次日相对信号日收盘高开超过 max_chase_pct（默认 3%；A 股校准
+    5%→3%：chase(3%,5%] 分桶均 -4.93% 胜率 12.5% 极差）放弃（不追高），
     低开超过 min_chase_pct（默认 −3%）同样放弃（突破隔夜即退潮、
     动能证伪）。
 
@@ -108,9 +112,9 @@ class GianlucaAsianBoxStrategy(BaseStrategy):
     def __init__(self, box_window: int = 20, max_box_width_pct: float = 0.15,
                  vol_window: int = 20, breakout_vol_mult: float = 1.5,
                  min_close_pos: float = 0.5,
-                 max_turn_pct: float = 15.0, max_signal_pct: float = 9.0,
+                 max_turn_pct: float = 10.0, max_signal_pct: float = 9.0,
                  skip_st: bool = True, skip_weekdays: Optional[List[int]] = None,
-                 min_chase_pct: float = -0.03, max_chase_pct: float = 0.05,
+                 min_chase_pct: float = -0.03, max_chase_pct: float = 0.03,
                  stop_loss_pct: float = 0.08, trail_pct: float = 0.06,
                  trail_activate_pct: float = 0.03,
                  take_profit_pct: float = 0.15, breakout_exit_days: int = 2,
@@ -129,11 +133,14 @@ class GianlucaAsianBoxStrategy(BaseStrategy):
         if isinstance(skip_st, str):
             skip_st = skip_st.strip().lower() not in ("false", "0", "no")
         self.skip_st = bool(skip_st)
-        # skip_weekdays 兼容 "[2,3]" 形式的字符串覆盖
+        # skip_weekdays 兼容 "[2,3]" 形式的字符串覆盖；None 用校准默认 [1]
+        # （信号日周二不入场，见 docs/strategy_gianluca.md##买入倾向排序）
         if isinstance(skip_weekdays, str):
             skip_weekdays = [int(x) for x in skip_weekdays.strip("[]").split(",")
                              if x.strip()]
-        self.skip_weekdays = {int(d) for d in (skip_weekdays or [])}
+        if skip_weekdays is None:
+            skip_weekdays = [1]
+        self.skip_weekdays = {int(d) for d in skip_weekdays}
         self.min_chase_pct = float(min_chase_pct)
         self.max_chase_pct = float(max_chase_pct)
         self.stop_loss_pct = float(stop_loss_pct)
