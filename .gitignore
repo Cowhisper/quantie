@@ -11,3 +11,7 @@ __pycache__
 # exp/ 下只入库 baseline.yaml，实验产物（交易明细/报告/实验记录）不入库
 exp/*
 !exp/baseline.yaml
+
+# dl 训练数据与模型产物
+dl/data/
+dl/checkpoints/
